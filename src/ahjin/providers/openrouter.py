@@ -1,6 +1,6 @@
-"""NVIDIA Model Provider implementation.
+"""OpenRouter Model Provider implementation.
 
-All NVIDIA-specific authentication, HTTP headers, payload formatting,
+All OpenRouter-specific authentication, HTTP headers, payload formatting,
 and API error handling stay entirely within this file.
 """
 
@@ -23,8 +23,8 @@ from ahjin.providers.types import (
 logger = structlog.get_logger()
 
 
-class NvidiaProvider(BaseModelProvider):
-    """NVIDIA API Model Provider."""
+class OpenRouterProvider(BaseModelProvider):
+    """OpenRouter API Model Provider."""
 
     def __init__(
         self,
@@ -34,32 +34,31 @@ class NvidiaProvider(BaseModelProvider):
         max_tokens: int | None = None,
         timeout_seconds: float | None = None,
     ) -> None:
-        self.api_key = settings.nvidia_api_key if api_key is None else api_key
-        self.base_url = (base_url or settings.nvidia_base_url).rstrip("/")
+        self.api_key = settings.openrouter_api_key if api_key is None else api_key
+        self.base_url = (base_url or settings.openrouter_base_url).rstrip("/")
         self.default_model = default_model or ""
-        # max_tokens: configuration-driven fallback.
         self.max_tokens = max_tokens if max_tokens is not None else settings.nvidia_max_tokens
-        # timeout_seconds: configuration-driven HTTP client timeout.
+
         self.timeout_seconds = (
-            timeout_seconds if timeout_seconds is not None else settings.nvidia_timeout_seconds
+            timeout_seconds if timeout_seconds is not None else settings.openrouter_timeout_seconds
         )
 
         # Fast-fail: do not allow construction with unconfigured credentials.
         if not self.api_key:
             raise ValueError(
-                "NVIDIA_API_KEY is not configured. "
-                "Set it in environment or .env before constructing NvidiaProvider."
+                "OPENROUTER_API_KEY is not configured. "
+                "Set it in environment or .env before constructing OpenRouterProvider."
             )
 
     @property
     def provider_id(self) -> str:
-        return "nvidia"
+        return "openrouter"
 
     def get_default_model_id(self) -> str:
         return self.default_model
 
     async def invoke(self, request: ModelInvocationRequest) -> ModelInvocationResponse:
-        """Invoke NVIDIA OpenAI-compatible chat completions API."""
+        """Invoke OpenRouter OpenAI-compatible chat completions API."""
         start_time = time.monotonic()
 
         t0_prep = time.monotonic()
@@ -76,10 +75,10 @@ class NvidiaProvider(BaseModelProvider):
         if not target_model_id:
             raise ValueError(
                 "model_id is not specified in request or provider default. "
-                "Specify model_id in request or initialize NvidiaProvider(default_model=...)."
+                "Specify model_id in request or initialize OpenRouterProvider(default_model=...)."
             )
 
-        payload = {
+        payload: dict[str, Any] = {
             "model": target_model_id,
             "messages": messages,
             "temperature": 0.7,
@@ -89,12 +88,14 @@ class NvidiaProvider(BaseModelProvider):
         headers = {
             "Authorization": f"Bearer {self.api_key}",
             "Content-Type": "application/json",
+            "HTTP-Referer": "https://ahjin.ai",
+            "X-Title": "AHJIN 2.0",
         }
 
         url = f"{self.base_url}/chat/completions"
         t_prep_ms = (time.monotonic() - t0_prep) * 1000.0
 
-        logger.info("[PROFILE] Calling NVIDIA API start", model=payload["model"], url=url)
+        logger.info("[PROFILE] Calling OpenRouter API start", model=payload["model"], url=url)
 
         t0_net = time.monotonic()
         async with httpx.AsyncClient(timeout=self.timeout_seconds) as client:
@@ -109,7 +110,7 @@ class NvidiaProvider(BaseModelProvider):
         elapsed_ms = (time.monotonic() - start_time) * 1000.0
 
         logger.info(
-            "[PROFILE] NVIDIA API response received",
+            "[PROFILE] OpenRouter API response received",
             model=payload["model"],
             payload_prep_ms=round(t_prep_ms, 3),
             network_http_ms=round(t_net_ms, 3),
@@ -121,16 +122,11 @@ class NvidiaProvider(BaseModelProvider):
         raw_content: str | None = choices[0]["message"].get("content") if choices else None
 
         if not raw_content:
-            # Model returned empty or null content — surface as an invocation error
-            # so the error boundary in HarnessRunner handles it correctly.
             raise ValueError(
-                f"NVIDIA model '{payload['model']}' returned empty content. "
+                f"OpenRouter model '{payload['model']}' returned empty content. "
                 "Try a different model or retry the request."
             )
 
-        # Map NVIDIA's raw finish_reason to AHJIN's canonical FinishReason.
-        # NVIDIA returns: 'stop' (natural end), 'length' (max_tokens hit), others.
-        # Previously hardcoded to COMPLETE — this masked truncation events.
         raw_finish_reason: str = (
             choices[0].get("finish_reason") or "stop"
         ) if choices else "stop"
@@ -142,10 +138,9 @@ class NvidiaProvider(BaseModelProvider):
             finish_reason = FinishReason.COMPLETE
 
         logger.info(
-            "[PROFILE] NVIDIA finish_reason mapped",
+            "[PROFILE] OpenRouter finish_reason mapped",
             raw_finish_reason=raw_finish_reason,
             canonical_finish_reason=finish_reason.value,
-            max_tokens_configured=payload["max_tokens"],
         )
 
         usage_data = data.get("usage", {})
@@ -168,7 +163,7 @@ class NvidiaProvider(BaseModelProvider):
     async def invoke_stream(
         self, request: ModelInvocationRequest
     ) -> AsyncGenerator[str, None]:
-        """Invoke NVIDIA API with stream=True and yield text chunks."""
+        """Invoke OpenRouter API with stream=True and yield text chunks."""
         import json
 
         messages: list[dict[str, str]] = []
@@ -184,7 +179,7 @@ class NvidiaProvider(BaseModelProvider):
         if not target_model_id:
             raise ValueError("model_id is not specified in request or provider default.")
 
-        payload = {
+        payload: dict[str, Any] = {
             "model": target_model_id,
             "messages": messages,
             "temperature": 0.7,
@@ -195,7 +190,10 @@ class NvidiaProvider(BaseModelProvider):
         headers = {
             "Authorization": f"Bearer {self.api_key}",
             "Content-Type": "application/json",
+            "HTTP-Referer": "https://ahjin.ai",
+            "X-Title": "AHJIN 2.0",
         }
+
         url = f"{self.base_url}/chat/completions"
 
         async with httpx.AsyncClient(timeout=self.timeout_seconds) as client:

@@ -6,6 +6,8 @@ from uuid import UUID, uuid4
 
 from pydantic import BaseModel, Field
 
+from ahjin.tools.base import ToolInvocationRequest
+
 
 class StepType(str, Enum):
     """Execution step classification."""
@@ -57,6 +59,7 @@ class PlanStep(BaseModel):
     step_id: UUID = Field(default_factory=uuid4)
     step_type: StepType = StepType.MODEL_INVOCATION
     model_intent: ModelStepIntent | None = None
+    tool_intent: ToolInvocationRequest | None = None
     depends_on: list[UUID] = Field(default_factory=list)  # pyright: ignore[reportUnknownVariableType]
     timeout_seconds: float = 30.0
 

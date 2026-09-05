@@ -16,9 +16,11 @@ ModelRouter is responsible for resolving the concrete model.
 """
 
 import time
+from typing import TYPE_CHECKING
 
 import structlog
 
+from ahjin.beru.tools import detect_tool_intent
 from ahjin.beru.types import (
     CapabilityRequirements,
     ExecutionPlan,
@@ -30,6 +32,10 @@ from ahjin.beru.types import (
 )
 from ahjin.core.types import TaskRequest
 from ahjin.models.types import ModelTier
+from ahjin.tools.base import ToolInvocationRequest
+
+if TYPE_CHECKING:
+    from ahjin.beru.tool_planner import ToolIntentPlanner
 
 logger = structlog.get_logger()
 
@@ -82,6 +88,9 @@ class BeruOrchestrator:
     Contains ZERO model IDs, provider names, or API endpoints.
     """
 
+    def __init__(self, tool_planner: "ToolIntentPlanner | None" = None) -> None:
+        self.tool_planner = tool_planner
+
     def analyze_task_requirements(self, text: str) -> CapabilityRequirements:
         """Analyze task text to determine provider-agnostic capability requirements.
 
@@ -112,6 +121,39 @@ class BeruOrchestrator:
         t0 = time.monotonic()
         text = request.intent.primary_text
         logger.info("[PROFILE] BERU planning start", task_id=str(request.task_id))
+
+        # 1. Hybrid Tool Planning: Try LLM Tool Intent Planner first,
+        # fallback to deterministic resolver
+        tool_intent: ToolInvocationRequest | None = None
+        if self.tool_planner is not None:
+            tool_intent = await self.tool_planner.plan_tool_intent(text)
+
+        if tool_intent is None:
+            tool_intent = detect_tool_intent(text)
+
+        if tool_intent is not None:
+            logger.info(
+                "[PROFILE] BERU selected tool execution",
+                task_id=str(request.task_id),
+                tool_name=tool_intent.tool_name,
+                parameters=tool_intent.parameters,
+            )
+            tool_step = PlanStep(
+                step_type=StepType.TOOL_INVOCATION,
+                tool_intent=tool_intent,
+            )
+            model_step = PlanStep(
+                step_type=StepType.MODEL_INVOCATION,
+                model_intent=ModelStepIntent(
+                    instruction=text,
+                    execution_strategy=ExecutionStrategy(preferred_tier="FAST"),
+                ),
+            )
+            return ExecutionPlan(
+                task_id=request.task_id,
+                correlation_id=request.correlation_id,
+                steps=[tool_step, model_step],
+            )
 
         reqs = self.analyze_task_requirements(text)
 

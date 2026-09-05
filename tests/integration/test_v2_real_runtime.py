@@ -112,17 +112,17 @@ async def test_simple_task_fast_tier_routing() -> None:
 
 @pytest.mark.asyncio
 async def test_reasoning_task_heavy_tier_routing() -> None:
-    """Reasoning prompt must route to HEAVY tier (Kimi K3 preferred)."""
+    """Reasoning prompt must route to HEAVY tier (MiniMax M3 preferred)."""
     catalog = create_default_catalog()
     registry = ProviderRegistry()
 
     class MockHeavyProvider(BaseModelProvider):
         @property
         def provider_id(self) -> str:
-            return "nvidia"
+            return "openrouter"
 
         def get_default_model_id(self) -> str:
-            return "moonshotai/kimi-k3"
+            return "minimax/minimax-m3:free"
 
         async def invoke(self, request: ModelInvocationRequest) -> ModelInvocationResponse:
             return ModelInvocationResponse(
@@ -145,10 +145,10 @@ async def test_reasoning_task_heavy_tier_routing() -> None:
     assert res.success is True
     assert res.runtime_info is not None
     assert res.runtime_info.tier == "HEAVY"
-    assert res.runtime_info.selected_model == "moonshotai/kimi-k3"
+    assert res.runtime_info.selected_model == "minimax/minimax-m3:free"
 
     footer = _build_runtime_footer(res.runtime_info)
-    assert "Model: Kimi K3" in footer
+    assert "Model: MiniMax M3" in footer
     assert "Route: HEAVY" in footer
 
 
@@ -166,10 +166,10 @@ async def test_coding_task_capability_routing() -> None:
     class MockCodingProvider(BaseModelProvider):
         @property
         def provider_id(self) -> str:
-            return "nvidia"
+            return "openrouter"
 
         def get_default_model_id(self) -> str:
-            return "nvidia/nemotron-3-ultra-550b-a55b"
+            return "minimax/minimax-m3:free"
 
         async def invoke(self, request: ModelInvocationRequest) -> ModelInvocationResponse:
             return ModelInvocationResponse(
@@ -193,6 +193,7 @@ async def test_coding_task_capability_routing() -> None:
     assert "```python" in (res.output_text or "")
     assert res.runtime_info is not None
     assert res.runtime_info.tier == "HEAVY"
+
 
 
 # ---------------------------------------------------------------------------

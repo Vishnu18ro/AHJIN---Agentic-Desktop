@@ -12,6 +12,8 @@ CRITICAL CONTRACT:
   can reliably identify and exclude the failed model during same-request recovery.
 """
 
+import time
+from collections.abc import AsyncGenerator
 from dataclasses import dataclass
 
 import structlog
@@ -105,5 +107,43 @@ class ProviderGateway:
             self.router.health_tracker.record_failure(model_id)
             # Attach selected model_id to exception so HarnessRunner can identify
             # and exclude the exact failed model during same-request recovery.
+            exc.model_id = model_id  # pyright: ignore[reportAttributeAccessIssue]
+            raise
+
+    async def invoke_stream(
+        self,
+        prompt: ContextualizedPrompt,
+        requirements: ExecutionStrategy | CapabilityRequirements,
+        excluded_model_ids: set[str] | None = None,
+    ) -> AsyncGenerator[tuple[str, ModelSelectionResult], None]:
+        """Resolve provider and model via ModelRouter and yield text chunks."""
+        selection = self.router.select_model(
+            requirements, excluded_model_ids=excluded_model_ids
+        )
+        provider: BaseModelProvider = self.registry.get_provider(selection.provider_id)
+        model_id = selection.model_id
+        max_tokens = selection.max_output_tokens
+
+        request = ModelInvocationRequest(
+            prompt=prompt,
+            model_id=model_id,
+            max_tokens=max_tokens,
+        )
+
+        logger.info(
+            "Invoking provider stream via gateway",
+            provider_id=provider.provider_id,
+            model_id=request.model_id,
+            tier=selection.tier.value,
+        )
+
+        t0 = time.monotonic()
+        try:
+            async for chunk in provider.invoke_stream(request):
+                yield chunk, selection
+            latency_ms = (time.monotonic() - t0) * 1000.0
+            self.router.health_tracker.record_success(model_id, latency_ms)
+        except Exception as exc:
+            self.router.health_tracker.record_failure(model_id)
             exc.model_id = model_id  # pyright: ignore[reportAttributeAccessIssue]
             raise

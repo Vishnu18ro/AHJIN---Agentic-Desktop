@@ -34,9 +34,39 @@ class ContextAssembler:
         retrieval: "RetrievalContext | None" = None,
         prior_results: list["StepResult"] | None = None,
     ) -> ContextualizedPrompt:
-        """Assemble ContextualizedPrompt from task context and intent."""
+        user_instruction = intent.instruction
+        if prior_results:
+            result_blocks: list[str] = []
+            for res in prior_results:
+                output_content = (
+                    res.output_text
+                    if res.output_text is not None
+                    else (str(res.error) if res.error else "No output")
+                )
+                success_str = "true" if res.success else "false"
+                block = (
+                    f"[TOOL RESULTS]\n"
+                    f"Step: {res.step_id}\n"
+                    f"Success: {success_str}\n"
+                    f"Output:\n"
+                    f"{output_content}\n"
+                    f"[/TOOL RESULTS]"
+                )
+                result_blocks.append(block)
+            if result_blocks:
+                grounding_note = (
+                    "INSTRUCTION TO MODEL: Base your response strictly on the tool observation "
+                    "results above. Clearly distinguish actual user files (e.g. on Desktop, "
+                    "Documents, Downloads) from project source code or test file references. "
+                    "If multiple candidate files match, present them as possibilities rather than "
+                    "declaring one as the user's actual document unless explicitly verified."
+                )
+                user_instruction = (
+                    user_instruction + "\n\n" + "\n\n".join(result_blocks) + "\n\n" + grounding_note
+                )
+
         return ContextualizedPrompt(
             conversation_history=task_context.conversation_history,
-            user_instruction=intent.instruction,
+            user_instruction=user_instruction,
         )
 

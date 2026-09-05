@@ -93,3 +93,18 @@ def test_provider_registry_does_not_import_nvidia_credentials() -> None:
     registry = ProviderRegistry()
     # Registry is empty — no credentials read
     assert registry._default_provider_id is None  # noqa: SLF001
+
+
+def test_nvidia_provider_configurable_timeout() -> None:
+    """NvidiaProvider must use configurable timeout_seconds setting or constructor override."""
+    from ahjin.core.config import settings
+    from ahjin.providers.nvidia import NvidiaProvider
+
+    provider_default = NvidiaProvider(api_key="test-key", default_model="test-model")
+    assert provider_default.timeout_seconds == settings.nvidia_timeout_seconds
+    assert provider_default.timeout_seconds == 90.0
+
+    provider_custom = NvidiaProvider(
+        api_key="test-key", default_model="test-model", timeout_seconds=120.0
+    )
+    assert provider_custom.timeout_seconds == 120.0

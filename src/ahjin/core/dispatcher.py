@@ -5,6 +5,7 @@ Delegates cognitive planning exclusively to BERU.
 """
 
 import time
+from collections.abc import AsyncGenerator
 
 import structlog
 
@@ -55,3 +56,26 @@ class TaskDispatcher:
             success=result.success,
         )
         return result
+
+    async def dispatch_stream(
+        self, request: TaskRequest
+    ) -> AsyncGenerator[tuple[str, TaskResult | None], None]:
+        """Route request through BERU -> Harness (streaming) -> Result."""
+        t0_disp = time.monotonic()
+        logger.info(
+            "[PROFILE] Dispatcher starting streaming task",
+            task_id=str(request.task_id),
+            correlation_id=str(request.correlation_id),
+        )
+
+        plan = await self.orchestrator.plan(request)
+
+        async for chunk, task_result in self.runner.run_stream(plan, request.context):
+            yield chunk, task_result
+
+        t_total_ms = (time.monotonic() - t0_disp) * 1000.0
+        logger.info(
+            "[PROFILE] Dispatcher completed streaming task",
+            task_id=str(request.task_id),
+            dispatcher_total_ms=round(t_total_ms, 3),
+        )

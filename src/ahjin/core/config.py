@@ -7,6 +7,7 @@ class Settings(BaseSettings):
     """AHJIN 2.0 configuration settings."""
 
     ahjin_env: str = "development"
+    offline_mode: bool = False
 
     # Telegram
     telegram_bot_token: str = ""
@@ -21,6 +22,21 @@ class Settings(BaseSettings):
     # Default 4096 allows complete responses without over-running typical Telegram payloads.
     # Model limits in ModelCatalog take precedence per model descriptor.
     nvidia_max_tokens: int = 4096
+
+    # HTTP client timeout in seconds for NVIDIA API requests.
+    # Default 90.0 seconds accommodates complex model reasoning generation.
+    nvidia_timeout_seconds: float = 90.0
+
+    # OpenRouter Provider
+    openrouter_api_key: str = ""
+    openrouter_base_url: str = "https://openrouter.ai/api/v1"
+    openrouter_timeout_seconds: float = 90.0
+
+    # Ollama Provider
+    ollama_base_url: str = "http://localhost:11434/v1"
+    ollama_enabled: bool = True
+    ollama_timeout_seconds: float = 60.0
+    ollama_embedding_model: str = "bge-m3:latest"
 
     model_config = SettingsConfigDict(
         env_file=".env",

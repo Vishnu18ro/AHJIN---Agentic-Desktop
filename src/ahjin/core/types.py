@@ -1,5 +1,7 @@
 """Canonical domain type definitions for AHJIN 2.0."""
 
+from __future__ import annotations
+
 from datetime import datetime, timezone
 from enum import Enum
 from uuid import UUID, uuid4
@@ -110,3 +112,9 @@ class TaskResult(BaseModel):
     error: AhjinError | None = None
     completed_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     runtime_info: RuntimeInfo | None = None  # Set by HarnessRunner; None if unavailable
+    # Phase 5 local escalation hook (type: LocalExecutionResult | None).
+    # Set by HarnessRunner when Qwen timeout → Gemma fallback occurred.
+    # Interface adapters check this to offer "higher-model opinion?" follow-up.
+    # Always None on cloud-path executions — fully backward-compatible.
+    local_escalation_hint: object | None = None
+

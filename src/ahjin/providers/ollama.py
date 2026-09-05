@@ -1,7 +1,7 @@
-"""NVIDIA Model Provider implementation.
+"""Ollama Model Provider implementation.
 
-All NVIDIA-specific authentication, HTTP headers, payload formatting,
-and API error handling stay entirely within this file.
+All Ollama-specific connection, endpoint formatting, payload formatting,
+and local API error handling stay entirely within this file.
 """
 
 import time
@@ -23,43 +23,32 @@ from ahjin.providers.types import (
 logger = structlog.get_logger()
 
 
-class NvidiaProvider(BaseModelProvider):
-    """NVIDIA API Model Provider."""
+class OllamaProvider(BaseModelProvider):
+    """Local Ollama API Model Provider using OpenAI-compatible chat completions."""
 
     def __init__(
         self,
-        api_key: str | None = None,
         base_url: str | None = None,
         default_model: str | None = None,
         max_tokens: int | None = None,
         timeout_seconds: float | None = None,
     ) -> None:
-        self.api_key = settings.nvidia_api_key if api_key is None else api_key
-        self.base_url = (base_url or settings.nvidia_base_url).rstrip("/")
+        self.base_url = (base_url or settings.ollama_base_url).rstrip("/")
         self.default_model = default_model or ""
-        # max_tokens: configuration-driven fallback.
         self.max_tokens = max_tokens if max_tokens is not None else settings.nvidia_max_tokens
-        # timeout_seconds: configuration-driven HTTP client timeout.
         self.timeout_seconds = (
-            timeout_seconds if timeout_seconds is not None else settings.nvidia_timeout_seconds
+            timeout_seconds if timeout_seconds is not None else settings.ollama_timeout_seconds
         )
-
-        # Fast-fail: do not allow construction with unconfigured credentials.
-        if not self.api_key:
-            raise ValueError(
-                "NVIDIA_API_KEY is not configured. "
-                "Set it in environment or .env before constructing NvidiaProvider."
-            )
 
     @property
     def provider_id(self) -> str:
-        return "nvidia"
+        return "ollama"
 
     def get_default_model_id(self) -> str:
         return self.default_model
 
     async def invoke(self, request: ModelInvocationRequest) -> ModelInvocationResponse:
-        """Invoke NVIDIA OpenAI-compatible chat completions API."""
+        """Invoke local Ollama OpenAI-compatible chat completions API."""
         start_time = time.monotonic()
 
         t0_prep = time.monotonic()
@@ -76,29 +65,24 @@ class NvidiaProvider(BaseModelProvider):
         if not target_model_id:
             raise ValueError(
                 "model_id is not specified in request or provider default. "
-                "Specify model_id in request or initialize NvidiaProvider(default_model=...)."
+                "Specify model_id in request or initialize OllamaProvider(default_model=...)."
             )
 
-        payload = {
+        payload: dict[str, Any] = {
             "model": target_model_id,
             "messages": messages,
             "temperature": 0.7,
             "max_tokens": request.max_tokens or self.max_tokens,
         }
 
-        headers = {
-            "Authorization": f"Bearer {self.api_key}",
-            "Content-Type": "application/json",
-        }
-
         url = f"{self.base_url}/chat/completions"
         t_prep_ms = (time.monotonic() - t0_prep) * 1000.0
 
-        logger.info("[PROFILE] Calling NVIDIA API start", model=payload["model"], url=url)
+        logger.info("[PROFILE] Calling Ollama API start", model=payload["model"], url=url)
 
         t0_net = time.monotonic()
         async with httpx.AsyncClient(timeout=self.timeout_seconds) as client:
-            resp = await client.post(url, json=payload, headers=headers)
+            resp = await client.post(url, json=payload)
             t_net_ms = (time.monotonic() - t0_net) * 1000.0
             resp.raise_for_status()
 
@@ -109,7 +93,7 @@ class NvidiaProvider(BaseModelProvider):
         elapsed_ms = (time.monotonic() - start_time) * 1000.0
 
         logger.info(
-            "[PROFILE] NVIDIA API response received",
+            "[PROFILE] Ollama API response received",
             model=payload["model"],
             payload_prep_ms=round(t_prep_ms, 3),
             network_http_ms=round(t_net_ms, 3),
@@ -121,16 +105,11 @@ class NvidiaProvider(BaseModelProvider):
         raw_content: str | None = choices[0]["message"].get("content") if choices else None
 
         if not raw_content:
-            # Model returned empty or null content — surface as an invocation error
-            # so the error boundary in HarnessRunner handles it correctly.
             raise ValueError(
-                f"NVIDIA model '{payload['model']}' returned empty content. "
-                "Try a different model or retry the request."
+                f"Ollama model '{payload['model']}' returned empty content. "
+                "Ensure local model is pulled and running."
             )
 
-        # Map NVIDIA's raw finish_reason to AHJIN's canonical FinishReason.
-        # NVIDIA returns: 'stop' (natural end), 'length' (max_tokens hit), others.
-        # Previously hardcoded to COMPLETE — this masked truncation events.
         raw_finish_reason: str = (
             choices[0].get("finish_reason") or "stop"
         ) if choices else "stop"
@@ -142,10 +121,9 @@ class NvidiaProvider(BaseModelProvider):
             finish_reason = FinishReason.COMPLETE
 
         logger.info(
-            "[PROFILE] NVIDIA finish_reason mapped",
+            "[PROFILE] Ollama finish_reason mapped",
             raw_finish_reason=raw_finish_reason,
             canonical_finish_reason=finish_reason.value,
-            max_tokens_configured=payload["max_tokens"],
         )
 
         usage_data = data.get("usage", {})
@@ -168,7 +146,7 @@ class NvidiaProvider(BaseModelProvider):
     async def invoke_stream(
         self, request: ModelInvocationRequest
     ) -> AsyncGenerator[str, None]:
-        """Invoke NVIDIA API with stream=True and yield text chunks."""
+        """Invoke Ollama API with stream=True and yield text chunks."""
         import json
 
         messages: list[dict[str, str]] = []
@@ -184,7 +162,7 @@ class NvidiaProvider(BaseModelProvider):
         if not target_model_id:
             raise ValueError("model_id is not specified in request or provider default.")
 
-        payload = {
+        payload: dict[str, Any] = {
             "model": target_model_id,
             "messages": messages,
             "temperature": 0.7,
@@ -192,14 +170,10 @@ class NvidiaProvider(BaseModelProvider):
             "stream": True,
         }
 
-        headers = {
-            "Authorization": f"Bearer {self.api_key}",
-            "Content-Type": "application/json",
-        }
         url = f"{self.base_url}/chat/completions"
 
         async with httpx.AsyncClient(timeout=self.timeout_seconds) as client:
-            async with client.stream("POST", url, json=payload, headers=headers) as response:
+            async with client.stream("POST", url, json=payload) as response:
                 response.raise_for_status()
                 async for line in response.aiter_lines():
                     line = line.strip()

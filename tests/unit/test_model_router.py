@@ -27,13 +27,13 @@ def test_fast_execution_tier_selected_for_general_tasks() -> None:
 
 
 def test_heavy_reasoning_tier_selected_when_reasoning_required() -> None:
-    """Heavy tier must be selected when reasoning is explicitly required (Kimi K3 preferred)."""
+    """Heavy tier must be selected when reasoning is explicitly required (MiniMax M3 preferred)."""
     router = ModelRouter(catalog=create_default_catalog())
     reqs = CapabilityRequirements(requires_reasoning=True)
 
     selection = router.select_model(reqs)
     assert selection.tier == ModelTier.HEAVY
-    assert selection.model_id == "moonshotai/kimi-k3"
+    assert selection.model_id == "minimax/minimax-m3:free"
 
 
 def test_stronger_incapable_model_must_never_beat_weaker_capable_model() -> None:
@@ -186,18 +186,18 @@ def test_unhealthy_strongest_model_skipped_and_healthy_alternative_selected() ->
     catalog = create_default_catalog()
     health = ModelHealthTracker()
 
-    # Mark top Kimi K3 model unhealthy
-    health.record_failure("moonshotai/kimi-k3")
-    health.record_failure("moonshotai/kimi-k3")
-    health.record_failure("moonshotai/kimi-k3")
-    target_state = health.get_state("moonshotai/kimi-k3")
+    # Mark top MiniMax M3 model unhealthy
+    health.record_failure("minimax/minimax-m3:free")
+    health.record_failure("minimax/minimax-m3:free")
+    health.record_failure("minimax/minimax-m3:free")
+    target_state = health.get_state("minimax/minimax-m3:free")
     assert target_state.status == ModelHealthStatus.UNHEALTHY
 
     router = ModelRouter(catalog=catalog, health_tracker=health)
     reqs = CapabilityRequirements(requires_reasoning=True)
 
     selection = router.select_model(reqs)
-    assert selection.model_id == "nvidia/nemotron-3-ultra-550b-a55b"
+    assert selection.model_id == "nvidia/nemotron-3-ultra-550b-a55b:free"
     assert selection.tier == ModelTier.HEAVY
 
 
@@ -267,15 +267,15 @@ async def test_harness_same_request_rerouting_on_degraded_model_failure() -> Non
 
     invoked_models: list[str] = []
 
-    class MockNvidiaProvider(BaseModelProvider):
-        provider_id = "nvidia"
+    class MockOpenRouterProvider(BaseModelProvider):
+        provider_id = "openrouter"
 
         def get_default_model_id(self) -> str:
-            return "moonshotai/kimi-k3"
+            return "minimax/minimax-m3:free"
 
         async def invoke(self, request: ModelInvocationRequest) -> ModelInvocationResponse:
             invoked_models.append(request.model_id)
-            if request.model_id == "moonshotai/kimi-k3":
+            if request.model_id == "minimax/minimax-m3:free":
                 # Standard httpx exception without custom model_id attribute
                 raise httpx.RequestError(
                     "Connection reset",
@@ -283,13 +283,13 @@ async def test_harness_same_request_rerouting_on_degraded_model_failure() -> Non
                 )
             return ModelInvocationResponse(
                 invocation_id=request.invocation_id,
-                provider_id="nvidia",
+                provider_id="openrouter",
                 content="Response from alternative model",
                 model_id=request.model_id,
             )
 
     registry = ProviderRegistry()
-    registry.register(MockNvidiaProvider())
+    registry.register(MockOpenRouterProvider())
     router = ModelRouter(catalog=create_default_catalog())
     gateway = ProviderGateway(registry=registry, router=router)
     runner = HarnessRunner(gateway=gateway)
@@ -318,7 +318,8 @@ async def test_harness_same_request_rerouting_on_degraded_model_failure() -> Non
     assert res.success is True
     assert res.output_text == "Response from alternative model"
     # Verify that the primary model was attempted first, failed, and WAS NOT selected again
-    assert invoked_models[0] == "moonshotai/kimi-k3"
-    assert "moonshotai/kimi-k3" not in invoked_models[1:]
-    assert invoked_models[1] == "nvidia/nemotron-3-ultra-550b-a55b"
+    assert invoked_models[0] == "minimax/minimax-m3:free"
+    assert "minimax/minimax-m3:free" not in invoked_models[1:]
+    assert invoked_models[1] == "nvidia/nemotron-3-ultra-550b-a55b:free"
     assert invoked_models[0] != invoked_models[1]
+

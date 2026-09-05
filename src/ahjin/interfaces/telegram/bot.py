@@ -56,6 +56,8 @@ def _chunk_message(text: str, chunk_size: int = TELEGRAM_MAX_MESSAGE_LENGTH) -> 
 def _model_short_name(model_id: str) -> str:
     """Return a compact, human-readable model name for the footer."""
     label_map = {
+        "minimax/minimax-m3:free": "MiniMax M3",
+        "nvidia/nemotron-3-ultra-550b-a55b:free": "Nemotron Ultra (OpenRouter)",
         "nvidia/nemotron-3.5-lightning-30b-a3b": "Nemotron Lightning 30B",
         "nvidia/nemotron-3-ultra-550b-a55b": "Nemotron Ultra 550B",
         "deepseek-ai/deepseek-v4-pro-0813": "DeepSeek V4 Pro",
@@ -63,6 +65,7 @@ def _model_short_name(model_id: str) -> str:
         "moonshotai/kimi-k3": "Kimi K3",
     }
     return label_map.get(model_id, model_id.split("/")[-1])
+
 
 
 def _health_icon(status: str) -> str:
@@ -180,7 +183,7 @@ class TelegramAdapter(BaseInterfaceAdapter):
         await self._health_command(update, context)
 
     async def _handle_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        """Handle incoming text messages."""
+        """Handle incoming text messages with progressive response streaming."""
         if not update.message or not update.message.text:
             return
 
@@ -195,49 +198,117 @@ class TelegramAdapter(BaseInterfaceAdapter):
         request = TelegramMapper.to_task_request(chat_id, text)
         t_map_ms = (time.monotonic() - t0_map) * 1000.0
 
-        # 2. Dispatch to AHJIN Core — adapter-level error boundary.
+        # 2. Send initial placeholder message
+        placeholder_msg = await update.message.reply_text("Thinking...")
+
+        accumulated_text = ""
+        first_token_received = False
+        last_edit_time = 0.0
+        final_task_result = None
         t0_dispatch = time.monotonic()
+
         try:
-            result = await self.dispatcher.dispatch(request)
+            async for chunk, task_result in self.dispatcher.dispatch_stream(request):
+                if chunk:
+                    if not first_token_received:
+                        first_token_received = True
+                    accumulated_text += chunk
+                    now = time.monotonic()
+                    if now - last_edit_time >= 1.0:
+                        last_edit_time = now
+                        display_text = (
+                            accumulated_text[:4000]
+                            if len(accumulated_text) > 4000
+                            else accumulated_text
+                        )
+                        try:
+                            await placeholder_msg.edit_text(display_text)
+                        except Exception as edit_err:
+                            logger.debug("Intermediate edit ignored", error=str(edit_err))
+
+                if task_result is not None:
+                    final_task_result = task_result
+
         except Exception as exc:
-            logger.error("Unhandled dispatch error", chat_id=chat_id, error=str(exc))
-            await update.message.reply_text("An internal error occurred. Please try again.")
-            return
+            logger.error(
+                "Streaming dispatch failed",
+                chat_id=chat_id,
+                error=str(exc),
+                first_token_received=first_token_received,
+            )
+            if not first_token_received:
+                # Fall back to non-streaming dispatch
+                try:
+                    result = await self.dispatcher.dispatch(request)
+                    final_task_result = result
+                    accumulated_text = TelegramMapper.to_telegram_response(result)
+                except Exception as fallback_exc:
+                    logger.error(
+                        "Fallback non-streaming dispatch failed",
+                        chat_id=chat_id,
+                        error=str(fallback_exc),
+                    )
+                    err_msg = "An internal error occurred. Please try again."
+                    try:
+                        await placeholder_msg.edit_text(err_msg)
+                    except Exception:
+                        await update.message.reply_text(err_msg)
+                    return
+            else:
+                # Partial response received, append stream interruption note
+                accumulated_text += "\n\n[Stream interrupted due to error]"
+
         t_dispatch_ms = (time.monotonic() - t0_dispatch) * 1000.0
 
-        # 3. Map TaskResult to Telegram output
-        response_text = TelegramMapper.to_telegram_response(result)
+        # Build response & footer
+        response_text = ""
+        if final_task_result is not None:
+            response_text = TelegramMapper.to_telegram_response(final_task_result)
+        if not response_text:
+            response_text = accumulated_text or "No response received."
 
-        # 4. Build runtime footer if observability data is available
         footer = ""
-        if result.runtime_info is not None:
-            # Override total_ms with the full wall-clock time including Telegram mapping overhead
+        if final_task_result is not None and final_task_result.runtime_info is not None:
             total_wall_ms = (time.monotonic() - t0_recv) * 1000.0
-            # Patch total_ms for accurate reporting; other fields come from runner
-            patched_info = result.runtime_info.model_copy(
+            patched_info = final_task_result.runtime_info.model_copy(
                 update={"total_ms": round(total_wall_ms, 1)}
             )
             footer = "\n\n" + _build_runtime_footer(patched_info)
 
-        # 5. Combine response + footer, then chunk for Telegram's 4096-char limit.
-        # Footer always appears on the final chunk.
         full_text = response_text + footer
         chunks = _chunk_message(full_text)
 
-        # 6. Reply to Telegram chat
+        # Final edit & chunk delivery
         t0_reply = time.monotonic()
-        for i, chunk in enumerate(chunks):
-            await update.message.reply_text(chunk)
-            if len(chunks) > 1:
+        try:
+            await placeholder_msg.edit_text(chunks[0])
+        except Exception as edit_err:
+            logger.warning("Final edit_text failed, sending reply instead", error=str(edit_err))
+            await update.message.reply_text(chunks[0])
+
+        if len(chunks) > 1:
+            for i, chunk in enumerate(chunks[1:]):
+                await update.message.reply_text(chunk)
                 logger.info(
                     "[PROFILE] Telegram chunk sent",
                     chat_id=chat_id,
-                    chunk_index=i + 1,
+                    chunk_index=i + 2,
                     total_chunks=len(chunks),
                     chunk_length=len(chunk),
                 )
         t_reply_ms = (time.monotonic() - t0_reply) * 1000.0
         t_total_ms = (time.monotonic() - t0_recv) * 1000.0
+
+        model_name = (
+            final_task_result.runtime_info.selected_model
+            if final_task_result and final_task_result.runtime_info
+            else "unknown"
+        )
+        was_rerouted = (
+            final_task_result.runtime_info.was_rerouted
+            if final_task_result and final_task_result.runtime_info
+            else False
+        )
 
         logger.info(
             "[PROFILE] Telegram message pipeline finished",
@@ -248,8 +319,8 @@ class TelegramAdapter(BaseInterfaceAdapter):
             total_end_to_end_ms=round(t_total_ms, 3),
             response_chunks=len(chunks),
             response_total_chars=len(full_text),
-            model_used=result.runtime_info.selected_model if result.runtime_info else "unknown",
-            was_rerouted=result.runtime_info.was_rerouted if result.runtime_info else False,
+            model_used=model_name,
+            was_rerouted=was_rerouted,
         )
 
     async def start(self) -> None:
