@@ -138,10 +138,43 @@ class BeruOrchestrator:
                 tool_name=tool_intent.tool_name,
                 parameters=tool_intent.parameters,
             )
-            tool_step = PlanStep(
-                step_type=StepType.TOOL_INVOCATION,
-                tool_intent=tool_intent,
+            steps: list[PlanStep] = [
+                PlanStep(
+                    step_type=StepType.TOOL_INVOCATION,
+                    tool_intent=tool_intent,
+                )
+            ]
+
+            # Combined Intent Orchestration: If request asks to SEND AND READ/ANALYZE
+            lower_text = text.lower()
+            send_kw = ("send", "attach", "give me", "upload", "share")
+            read_kw = (
+                "summarize", "summary", "explain", "read", "tell me", "what does", "analyze"
             )
+            has_send = any(k in lower_text for k in send_kw)
+            has_read = any(k in lower_text for k in read_kw)
+
+            if has_send and has_read:
+                # If primary tool was file_send, add file_read step
+                if tool_intent.tool_name == "file_send":
+                    read_intent = ToolInvocationRequest(
+                        tool_name="file_read",
+                        parameters=tool_intent.parameters,
+                    )
+                    steps.append(
+                        PlanStep(step_type=StepType.TOOL_INVOCATION, tool_intent=read_intent)
+                    )
+                # If primary tool was file_read, add file_send step
+                elif tool_intent.tool_name == "file_read":
+                    send_intent = ToolInvocationRequest(
+                        tool_name="file_send",
+                        parameters=tool_intent.parameters,
+                    )
+                    steps.insert(
+                        0,
+                        PlanStep(step_type=StepType.TOOL_INVOCATION, tool_intent=send_intent),
+                    )
+
             model_step = PlanStep(
                 step_type=StepType.MODEL_INVOCATION,
                 model_intent=ModelStepIntent(
@@ -149,10 +182,12 @@ class BeruOrchestrator:
                     execution_strategy=ExecutionStrategy(preferred_tier="FAST"),
                 ),
             )
+            steps.append(model_step)
+
             return ExecutionPlan(
                 task_id=request.task_id,
                 correlation_id=request.correlation_id,
-                steps=[tool_step, model_step],
+                steps=steps,
             )
 
         reqs = self.analyze_task_requirements(text)

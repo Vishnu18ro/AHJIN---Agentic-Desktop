@@ -1,5 +1,6 @@
 """Harness execution state tracking."""
 
+from pathlib import Path
 from uuid import UUID
 
 from pydantic import BaseModel, Field
@@ -14,6 +15,7 @@ class StepResult(BaseModel):
     success: bool
     output_text: str | None = None
     error: AhjinError | None = None
+    attachment_paths: list[Path] = Field(default_factory=list)  # pyright: ignore[reportUnknownVariableType]
 
 
 class ExecutionState(BaseModel):

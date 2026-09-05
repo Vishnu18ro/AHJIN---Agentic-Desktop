@@ -14,6 +14,8 @@ Execution contract:
 import asyncio
 import time
 from collections.abc import AsyncGenerator
+from pathlib import Path
+from typing import Any, cast
 
 import httpx
 import structlog
@@ -502,12 +504,16 @@ class HarnessRunner:
                 if step_res.output_text is not None:
                     last_output = step_res.output_text
 
+        file_attachments: list[Path] = [
+            att_path for s_res in state.step_results for att_path in s_res.attachment_paths
+        ]
         final_task_result = TaskResult(
             task_id=plan.task_id,
             correlation_id=plan.correlation_id,
             success=True,
             output_text=last_output,
             runtime_info=runtime_info,
+            file_attachments=file_attachments,
             local_escalation_hint=local_escalation_hint,
         )
         yield "", final_task_result
@@ -555,12 +561,26 @@ class HarnessRunner:
         tool = self.tool_registry.get_tool(tool_name)
         try:
             res = await tool.execute(step.tool_intent)
-            output_str = str(res.output) if res.output is not None else None
+            output_str: str | None = None
+            attachment_paths: list[Path] = []
+            output_obj: object = res.output
+            if isinstance(output_obj, dict):
+                res_dict = cast(dict[str, Any], output_obj)
+                output_str = str(res_dict.get("text", ""))
+                raw_paths = res_dict.get("attachment_paths", [])
+                if isinstance(raw_paths, list):
+                    for p in cast(list[Any], raw_paths):
+                        if isinstance(p, (str, Path)):
+                            attachment_paths.append(Path(p))
+            elif res.output is not None:
+                output_str = str(res.output)
+
             return StepResult(
                 step_id=step.step_id,
                 success=res.success,
                 output_text=output_str,
                 error=res.error,
+                attachment_paths=attachment_paths,
             )
         except Exception as exc:
             logger.error(

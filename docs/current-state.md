@@ -4,58 +4,70 @@
 
 | Subsystem | State | Notes |
 |---|---|---|
-| **Architecture** | LOCKED | Master System Blueprint & V2 Execution Architecture |
-| **Documentation** | LOCKED | Updated for V2 Multi-Model Routing & Recovery Milestone |
+| **Architecture** | LOCKED | Master System Blueprint & Multi-Tier Agentic Architecture |
+| **Documentation** | OPERATIONAL | Updated for Phase 7 (Browser, Files, RAG, Local Fleet & Tools) |
 | **Python Runtime** | OPERATIONAL | Python 3.12+, uv, Pydantic v2, asyncio |
 | **Package Structure** | OPERATIONAL | Modular monolith (`src/ahjin`) |
-| **Model Intelligence** | OPERATIONAL | ModelCatalog, ModelRouter, ModelHealthTracker |
-| **Cognitive Orchestration** | OPERATIONAL | BERU Orchestrator & ExecutionStrategy |
-| **Execution Runtime** | OPERATIONAL | HarnessRunner, ContextAssembler, ResponseVerifier |
-| **Provider Gateway** | OPERATIONAL | ProviderGateway, NvidiaProvider |
-| **Interface Adapter** | OPERATIONAL | TelegramAdapter with runtime observability footer & `/health` / `/models` commands |
-| **Validation Suite** | OPERATIONAL | 73 automated tests passing (100%), Pyright clean (0 errors), Ruff clean |
+| **Model Intelligence** | OPERATIONAL | ModelCatalog, ModelRouter (5-pass in-memory), ModelHealthTracker |
+| **Cognitive Orchestration** | OPERATIONAL | BERU Orchestrator, Capability Extraction, ToolIntentPlanner |
+| **Execution Runtime** | OPERATIONAL | HarnessRunner, ContextAssembler, ResponseVerifier, ExecutionState |
+| **Provider Gateway** | OPERATIONAL | OpenRouter, NVIDIA NIM, Local Ollama Fleet |
+| **Local Offline Inference** | OPERATIONAL | LocalExecutor (Gemma 3 4B FAST, Qwen 3 8B HEAVY with 90s deadline) |
+| **Interface Adapter** | OPERATIONAL | TelegramAdapter with chunked streaming, file attachments, & `/health` / `/models` |
+| **Tool Ecosystem** | OPERATIONAL | ToolRegistry, SystemInfoTool, FileSearchTool, FileReadTool, FileSendTool, WebSearchTool, BrowserTool |
+| **Security & Containment** | OPERATIONAL | SafePathPolicy, PermissionGate, sensitive file blocking, path traversal prevention |
+| **Knowledge / RAG** | OPERATIONAL | DocumentIngestor, page-aware chunking, BGE-M3 (1024-dim), SQLite vector store (`ahjin_rag.db`) |
+| **Validation Suite** | OPERATIONAL | **224 automated tests passing (100%)**, Pyright clean (0 errors), Ruff clean |
 
 ---
 
-## 2. Implemented V2 System Architecture
+## 2. Implemented System Architecture
 
 ```text
 USER (Telegram Client)
     │
     ▼
 TELEGRAM ADAPTER (`src/ahjin/interfaces/telegram/bot.py`)
-    │  └── Renders response + Runtime Observability Footer & /health /models commands
+    │  ├── Renders progressive chunked streaming (1.0s interval edits)
+    │  ├── Dispatches binary file attachments (up to 50MB)
+    │  └── Serves diagnostic commands (`/health`, `/models`)
     ▼
 CORE DISPATCHER (`src/ahjin/core/dispatcher.py`)
     │  └── Lifecycle forwarding & request routing (zero business decisions)
     ▼
 BERU ORCHESTRATOR (`src/ahjin/beru/orchestrator.py`)
-    │  └── Task understanding ──► Emits ExecutionStrategy & CapabilityRequirements
+    │  ├── Capability Analysis ──► Emits ExecutionStrategy & CapabilityRequirements
+    │  ├── LLM Tool Intent Planner (`src/ahjin/beru/tool_planner.py`) ──► JSON Tool Invocation Intent
+    │  └── Deterministic Fallback (`src/ahjin/beru/tools.py`)
     ▼
 HARNESS RUNNER (`src/ahjin/harness/runner.py`)
-    │  ├── ContextAssembler (`src/ahjin/harness/context.py`)
-    │  └── Execution Loop (enforces require_verification, recovery_policy, max_recovery_attempts)
+    │  ├── ContextAssembler (`src/ahjin/harness/context.py`) [injects [TOOL RESULTS] & grounding]
+    │  ├── Step Sequencing Loop & ExecutionState (`src/ahjin/harness/state.py`)
+    │  ├── ResponseVerifier (`src/ahjin/harness/verifier.py`)
+    │  ├── Same-Request Cloud Rerouting Budget (max_recovery_attempts = 2)
+    │  └── Local Fallback Controller (Ollama on cloud exhaustion or offline mode)
     ▼
-PROVIDER GATEWAY (`src/ahjin/harness/gateway.py`)
-    │  └── Delegates selection to ModelRouter (NO production fallback bypass)
-    ▼
-MODEL ROUTER (`src/ahjin/models/router.py`)
-    │  ├── ModelCatalog (`src/ahjin/models/catalog.py`) [FAST vs HEAVY Tiers, Capabilities, Limits]
-    │  └── ModelHealthTracker (`src/ahjin/models/health.py`) [Thread-safe Circuit Breakers & Latency EMA]
-    ▼
-NVIDIA PROVIDER (`src/ahjin/providers/nvidia.py`)
-    │  └── API payload serialization, HTTP client, finish_reason mapping
-    ▼
-NVIDIA API (`https://integrate.api.nvidia.com/v1`)
+ ┌─────────────────────────────┬─────────────────────────────┬─────────────────────────────┐
+ │        MODEL LAYER          │         TOOL LAYER          │      KNOWLEDGE LAYER        │
+ │ ModelRouter (5-pass)        │ ToolRegistry                │ DocumentIngestor (pypdf)    │
+ │ ModelCatalog                │ PermissionGate              │ TextChunker (page-aware)    │
+ │ ModelHealthTracker          │ SafePathPolicy              │ BGE-M3 Dense Embeddings     │
+ │ ProviderGateway             │ ├── SystemInfoTool          │ SQLite Vector Store         │
+ │ ├── OpenRouter (Cloud)      │ ├── FileSearchTool          │ (`ahjin_rag.db`)            │
+ │ ├── NVIDIA NIM (Cloud)      │ ├── FileReadTool            │                             │
+ │ └── Ollama (Local Fleet)    │ ├── FileSendTool            │                             │
+ │      ├── Gemma 3 4B (FAST)  │ ├── WebSearchTool           │                             │
+ │      └── Qwen 3 8B (HEAVY)  │ └── BrowserTool (Playwright)│                             │
+ └─────────────────────────────┴─────────────────────────────┴─────────────────────────────┘
     │
     ▼
-SELECTED MODEL (`nvidia/nemotron-3.5-lightning-30b-a3b` for FAST; `nvidia/nemotron-3-ultra-550b-a55b` for HEAVY)
+OBSERVATIONS & EXECUTION STATE
     │
     ▼
-RESPONSE VERIFIER (`src/ahjin/harness/verifier.py`)
-    │  └── Structural verification boundary
+MODEL REASONING & RESPONSE VERIFICATION
+    │
     ▼
-OBSERVATION & SAME-REQUEST RECOVERY (If invocation fails ──► health degraded ──► model excluded ──► rerouted)
+TASK RESULT WITH OPTIONAL FILE ATTACHMENTS ──► TELEGRAM
 ```
 
 ---
@@ -63,120 +75,49 @@ OBSERVATION & SAME-REQUEST RECOVERY (If invocation fails ──► health degrad
 ## 3. Subsystem Responsibility Boundaries
 
 - **Core Dispatcher**: Lifecycle management and request forwarding. Pure entry point; contains zero cognitive or model routing logic.
-- **BERU Orchestrator**: Strategic cognitive decision engine. Analyzes task text to produce provider-agnostic `ExecutionStrategy` and `CapabilityRequirements`. Contains **ZERO** model IDs, provider IDs, API endpoints, or hardcoded fallback chains.
-- **ModelCatalog**: In-memory registry of static `ModelDescriptor` metadata (`model_id`, `provider_id`, `tier`, `capabilities`, `limits`, `priority`, `quality_score`).
+- **BERU Orchestrator**: Strategic cognitive decision engine. Analyzes task text to produce provider-agnostic `ExecutionStrategy` and `CapabilityRequirements`. Coordinates `ToolIntentPlanner` to generate structured JSON tool intents bounded by schemas.
+- **ModelCatalog**: In-memory registry of static `ModelDescriptor` metadata across active cloud candidates and local Ollama models.
 - **ModelRouter**: In-memory, zero-latency model selection engine. Evaluates models through a strict 5-pass pipeline:
   1. *Hard Capability Eligibility Gate* (incapable models can **never** beat capable models)
-  2. *Health Availability Filter*
+  2. *Health Availability Filter* (excludes unhealthy or already-failed models)
   3. *Hard Latency Constraint Pass* (`max_latency_ms`)
   4. *Tier Preference Match* (`FAST` vs `HEAVY`)
-  5. *Ranking Pass* (`quality_score` $\times$ `quality_weight` + `priority` - `latency_penalty` + `endpoint_verified` micro tie-breaker)
-- **ModelHealthTracker**: Dynamic operational health tracking. Manages model health states, consecutive failures, circuit breakers, and latency Exponential Moving Average (EMA). Protected by `threading.Lock`.
-- **Harness Runner**: Step sequencing, verification, and failure recovery loop. Executes strategy policies (`require_verification`, `recovery_policy`, `max_recovery_attempts`) and builds `RuntimeInfo` for observability.
-- **Provider Gateway**: Translates execution strategy requirements into concrete `(Provider, ModelID)` selections via `ModelRouter`. Raises `KeyError` explicitly if a provider is unknown (no silent production bypass).
-- **NVIDIA Provider**: External HTTP API integration. Handles OpenAI-compatible chat completions requests, header authorization, JSON parsing, and finish reason mapping (`length` $\to$ `MAX_TOKENS`, `stop` $\to$ `COMPLETE`).
-- **Telegram Adapter**: Interface adapter. Translates Telegram updates to canonical `TaskRequest` domain types, handles 4096-character message chunking, appends the compact runtime footer to final chunks, and serves diagnostic commands (`/health`, `/models`).
-- **Response Verifier**: Structural output verification boundary. Validates output text non-emptiness before returning to callers.
+  5. *Two-Key Ranking Pass* (priority ordinal key + blended quality/latency score)
+- **ModelHealthTracker**: Dynamic operational health tracking. Manages model health states (`HEALTHY`, `DEGRADED`, `UNHEALTHY`, `RECOVERY_PROBE_ELIGIBLE`), consecutive failures, circuit breakers, and latency Exponential Moving Average (EMA). Thread-safe with locks.
+- **Harness Runner**: Step sequencing, verification, and failure recovery loop. Executes strategy policies (`require_verification`, `recovery_policy`, `max_recovery_attempts`) and tracks intermediate tool observations.
+- **Local Executor**: Handles air-gapped local execution via Ollama (`gemma3:4b` for FAST, `qwen3:8b` for HEAVY). Enforces an application-level **90-second timeout** on Qwen, safely falling back to Gemma with the original prompt preserved.
+- **Tool Ecosystem & SafePathPolicy**: Sandboxed execution across authorized roots (`Workspace`, `Desktop`, `Documents`, `Downloads`). Blocks traversal (`..`), sensitive files (`.env`, `.pem`, credentials), and system directories (`C:\Windows`, `Program Files`).
+- **Knowledge / RAG Subsystem**: Self-contained semantic retrieval using page-aware document chunking, BGE-M3 1024-dimensional dense embeddings, and persistent SQLite vector storage.
+- **Telegram Adapter**: Remote interface handling 4096-character chunking, 1.0s throttled progressive streaming, binary document attachment delivery, and diagnostic commands (`/health`, `/models`).
 
 ---
 
-## 4. Dynamic Model Health Architecture
+## 4. Operational Model Fleet
 
-Model operational health is dynamic and observed from real traffic:
+### A. Active Cloud Models (Online Runtime)
+1. **`nvidia/nemotron-3.5-lightning-30b-a3b`** (FAST #1, Priority 200, Quality 85)
+2. **`minimax/minimax-m3:free`** (HEAVY #1 via OpenRouter, Priority 250, Quality 95)
+3. **`nvidia/nemotron-3-ultra-550b-a55b:free`** (HEAVY #2 via OpenRouter, Priority 230, Quality 95)
+4. **`nvidia/nemotron-3-ultra-550b-a55b`** (HEAVY #3 via NVIDIA NIM, Priority 200, Quality 95)
+5. **`moonshotai/kimi-k3`** (HEAVY #4 via NVIDIA NIM, Priority 170, Quality 87)
+6. **`deepseek-ai/deepseek-v4-pro-0813`** (HEAVY #5 via NVIDIA NIM, Priority 150, Quality 92)
+7. **`deepseek-ai/deepseek-v4-flash-0731`** (HEAVY #6 via NVIDIA NIM, Priority 130, Quality 90)
 
-```text
-HEALTHY
-   │  (operational failure recorded)
-   ▼
-DEGRADED
-   │  (consecutive failures >= 3)
-   ▼
-UNHEALTHY
-   │  (cooldown expired: model becomes eligible for probe)
-   ▼
-RECOVERY PROBE ELIGIBLE
-   │  (empirical successful invocation recorded)
-   ▼
-HEALTHY
-```
-
-### Key Health Rules:
-1. **Evidence-Based Recovery**: Cooldown expiration alone does **NOT** restore `HEALTHY` status. Health restoration requires an empirical successful invocation (`record_success()`).
-2. **Dynamic Operations**: Health state updates automatically on real invocations. A `DEGRADED` model remains eligible for routing; an `UNHEALTHY` model enters circuit breaker cooldown.
-3. **Decoupled Architecture**: Static `ModelCatalog` metadata and dynamic `ModelHealthTracker` state remain 100% separate.
+### B. Active Local Models (Offline Runtime via Ollama)
+1. **`gemma3:4b`** (FAST Local, Priority 100, Quality 80)
+2. **`qwen3:8b`** (HEAVY Local, Priority 120, Quality 85; 90s timeout with Gemma fallback)
 
 ---
 
-## 5. Same-Request Failure Recovery
-
-- **Recovery Strategy**: Governed by `ExecutionStrategy.recovery_policy` (`REROUTE` vs `FAIL_FAST`) and `max_recovery_attempts` (default `2`).
-- **Bounded Budget**: `max_recovery_attempts = 2` means 1 primary attempt + at most 1 alternate model reroute attempt. This prevents unbounded latency or retry loops ($2 \times 35\text{s} = 70\text{s}$ wall-clock limit).
-- **Request Isolation**: `excluded_model_ids` is request-local (`set()`), preventing failure exclusions in Request A from contaminating parallel Request B.
-- **Explicit Failure Boundary**: If the recovery budget is exhausted or capabilities are unavailable, HarnessRunner surfaces a clean `INVOCATION_FAILED` error.
-
----
-
-## 6. Runtime Observability & Commands
-
-### Telegram Runtime Footer Format:
-```text
-━━━━━━━━━━━━━━━━
-⚡ AHJIN Runtime
-Model: Nemotron Lightning 30B
-Route: FAST
-AHJIN: 16ms
-Model: 25032ms
-Total: 26234ms
-Path:  Direct
-Health: 🟢 Healthy
-━━━━━━━━━━━━━━━━
-```
-*(If same-request rerouting occurs, `Path: ↪ Rerouted`, `From: <failed model>`, and `Reason: <cause>` are displayed.)*
-
-### Diagnostic Commands (`/health` & `/models`):
-Produces a compact live snapshot of current model health states and latency EMAs from `ModelHealthTracker`:
-```text
-AHJIN Model Health
-
-🟢 Nemotron Lightning 30B [FAST]
-   Healthy · EMA 25.0s
-
-🟡 Nemotron Ultra 550B [HEAVY]
-   Degraded · 1 failure · no latency data
-
-🟡 DeepSeek V4 Pro [HEAVY]
-   Degraded · 1 failure · no latency data
-
-🟢 DeepSeek V4 Flash [HEAVY]
-   Healthy · no latency data
-```
-
----
-
-## 7. Real-World Validation History
-
-Verification is categorized strictly by evidence source:
-
-1. **Real Telegram E2E Verification (Live NVIDIA Remote API)**:
-   - **Simple Task (`"Hi"`)**: Routed to `FAST` tier (`nvidia/nemotron-3.5-lightning-30b-a3b`). Response delivered successfully in `26.2s` (`16ms` AHJIN internal, `25.0s` API) with `Direct` path and `🟢 Healthy` footer.
-   - **Reasoning Task (`"Explain quantum physics..."`)**: Routed to `HEAVY` tier (`nvidia/nemotron-3-ultra-550b-a55b`). Model 1 timed out after 35s; health degraded to `🟡 DEGRADED`. Same-request recovery rerouted to Model 2 (`deepseek-ai/deepseek-v4-pro-0813`), which also timed out after 35s. Bounded recovery budget ($2/2$ attempts) exhausted $\to$ surfaced clean `INVOCATION_FAILED` error.
-   - **Live Health Diagnostics**: Sent `/models` command in Telegram chat. Response accurately rendered live operational state (`Nemotron Lightning 🟢 Healthy`, `Nemotron Ultra 🟡 Degraded`, `DeepSeek V4 Pro 🟡 Degraded`).
-
-2. **Automated Integration & Unit Testing**:
-   - 73 tests passing (100%), including multi-word vision phrase detection, `require_verification` toggle, `FAIL_FAST` policy, `quality_preference` ranking, `max_latency_ms` filtering, evidence-based health recovery, and concurrent request isolation.
-
-3. **Simulated Reroute Testing**:
-   - `test_same_request_rerouting_observability` verified full footer rendering for `↪ Rerouted` paths with explicit error classification (`network error`, `timeout`, `verification failure`).
-
----
-
-## 8. Validation Status
-- **Pytest**: `73 passed in 1.57s`
-- **Ruff**: `All checks passed!`
+## 5. Validation Status
+- **Pytest**: `224 passed in 35.79s` (100% pass rate across unit and integration suites)
+- **Ruff**: `All checks passed! Clean code style.`
 - **Pyright**: `0 errors, 0 warnings, 0 informations`
+- **Subsystem Validations**: RAG E2E, live Ollama inference, BGE-M3 vector search, file discovery, PDF parsing, Telegram file attachment delivery, web search, and Playwright browser navigation.
 
 ---
 
-## 9. Current Limitations & Planned Capabilities
-- **Streaming Output ("Word-by-Word")**: **NOT YET IMPLEMENTED**. Current V2 returns completed block responses. Progressive streaming is planned as a future capability.
-- **Task Requirement Heuristics**: BERU uses deterministic keyword and multi-word phrase matching (`_CODING_KEYWORDS`, `_REASONING_KEYWORDS`, `_VISION_PHRASES`). Richer semantic intent classification without LLM calls is planned for future passes.
+## 6. Current Limitations & Planned Roadmap
+- **DOM-Based Browser Automation**: The Playwright `BrowserTool` relies on CSS selectors and DOM text elements. Pure vision-guided pixel clicking is planned as Future Work.
+- **Text-Only RAG**: Document processing supports text files and extractable PDF layers; scanned bitmap OCR and multimodal diagram understanding remain Future Work.
+- **Long-Term Episodic Memory**: Session memory persists execution state within a request; cross-session knowledge graph memory is planned for subsequent architectural phases.

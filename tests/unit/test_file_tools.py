@@ -1,7 +1,9 @@
 """Unit tests for Phase 6C.1 File Intelligence tools."""
 
+import zipfile
 from pathlib import Path
 
+import pypdf
 import pytest
 
 from ahjin.core.errors import ErrorCategory
@@ -438,5 +440,69 @@ async def test_file_search_path_traversal_blocked(tmp_path: Path) -> None:
     assert res.success is False
     assert res.error is not None
     assert res.error.category == ErrorCategory.VALIDATION
+
+
+# ============================================================================
+# Phase 6C.3 PDF & ZIP FileReadTool Tests
+# ============================================================================
+
+
+@pytest.mark.asyncio
+async def test_file_read_pdf_extraction(tmp_path: Path) -> None:
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    pdf_path = ws / "test_doc.pdf"
+
+    # Create a real 2-page PDF using pypdf.PdfWriter
+    writer = pypdf.PdfWriter()
+    writer.add_blank_page(width=100, height=100)
+    writer.add_blank_page(width=100, height=100)
+    with pdf_path.open("wb") as f:
+        writer.write(f)
+
+    policy = SafePathPolicy(workspace_root=ws)
+    tool = FileReadTool(path_policy=policy)
+
+    # 1. Read entire document
+    req = ToolInvocationRequest(tool_name="file_read", parameters={"path": "test_doc.pdf"})
+    res = await tool.execute(req)
+    assert res.success is True
+    assert "2 pages" in str(res.output)
+    assert "--- Page 1 ---" in str(res.output)
+
+    # 2. Read specific page_number=2
+    req_p2 = ToolInvocationRequest(
+        tool_name="file_read",
+        parameters={"path": "test_doc.pdf", "content_scope": "page", "page_number": 2},
+    )
+    res_p2 = await tool.execute(req_p2)
+    assert res_p2.success is True
+    assert "--- Page 2 ---" in str(res_p2.output)
+    assert "--- Page 1 ---" not in str(res_p2.output)
+
+
+@pytest.mark.asyncio
+async def test_file_read_zip_inspection(tmp_path: Path) -> None:
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    zip_path = ws / "sample.zip"
+
+    # Create a real ZIP file
+    with zipfile.ZipFile(zip_path, "w") as zf:
+        zf.writestr("notes.txt", "Sample notes inside zip")
+        zf.writestr("src/main.py", "print('hello')")
+
+    policy = SafePathPolicy(workspace_root=ws)
+    tool = FileReadTool(path_policy=policy)
+
+    req = ToolInvocationRequest(tool_name="file_read", parameters={"path": "sample.zip"})
+    res = await tool.execute(req)
+
+    assert res.success is True
+    assert res.output is not None
+    assert "ARCHIVE CONTENTS" in str(res.output)
+    assert "notes.txt" in str(res.output)
+    assert "src/main.py" in str(res.output)
+
 
 

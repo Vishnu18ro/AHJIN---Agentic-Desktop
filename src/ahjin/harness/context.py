@@ -56,10 +56,11 @@ class ContextAssembler:
             if result_blocks:
                 grounding_note = (
                     "INSTRUCTION TO MODEL: Base your response strictly on the tool observation "
-                    "results above. Clearly distinguish actual user files (e.g. on Desktop, "
-                    "Documents, Downloads) from project source code or test file references. "
-                    "If multiple candidate files match, present them as possibilities rather than "
-                    "declaring one as the user's actual document unless explicitly verified."
+                    "results above. If web search results are provided, answer using those "
+                    "retrieved sources and cite relevant source URLs or domains. If a search "
+                    "returned no results or failed, state clearly that search did not return "
+                    "results and do not invent information. For local files, clearly "
+                    "distinguish actual user files from source/test files."
                 )
                 user_instruction = (
                     user_instruction + "\n\n" + "\n\n".join(result_blocks) + "\n\n" + grounding_note

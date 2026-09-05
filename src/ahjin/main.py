@@ -19,7 +19,14 @@ from ahjin.providers.ollama import OllamaProvider
 from ahjin.providers.openrouter import OpenRouterProvider
 from ahjin.providers.registry import ProviderRegistry
 from ahjin.security import AllowAllPermissionGate
-from ahjin.tools import FileReadTool, FileSearchTool, ToolRegistry
+from ahjin.tools import (
+    BrowserTool,
+    FileReadTool,
+    FileSearchTool,
+    FileSendTool,
+    ToolRegistry,
+    WebSearchTool,
+)
 from ahjin.tools.system_info import SystemInfoTool
 
 logger = structlog.get_logger()
@@ -27,13 +34,16 @@ logger = structlog.get_logger()
 
 async def main() -> None:
     """Bootstrap AHJIN 2.0 application."""
-    logger.info("AHJIN 2.0 starting up", version="2.0.0")
+    logger.info("AHJIN 2.0 starting up", version="2.0.0", python_executable=sys.executable)
 
     # --- Tool & Security bootstrap ---
     tool_registry = ToolRegistry()
     tool_registry.register(SystemInfoTool())
     tool_registry.register(FileReadTool())
     tool_registry.register(FileSearchTool())
+    tool_registry.register(FileSendTool())
+    tool_registry.register(WebSearchTool())
+    tool_registry.register(BrowserTool())
     logger.info("ToolRegistry initialized with baseline tools", tools=tool_registry.list_tools())
 
     permission_gate = AllowAllPermissionGate()

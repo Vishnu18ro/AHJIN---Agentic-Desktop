@@ -42,3 +42,6 @@ htmlcov/
 .ruff_cache/
 .import_linter_cache/
 *.log
+
+# Scratch Directory
+scratch/

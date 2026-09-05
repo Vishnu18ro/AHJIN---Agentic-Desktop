@@ -27,34 +27,65 @@ AVAILABLE TOOLS CATALOG:
 2. file_search
    Purpose: Search files on PC or workspace by filename, directory path, or text content.
    Parameters:
-     "query": core search term (e.g. "resume", "notes", "ModelRouter"). Do NOT use generic
-              file extension words ("pdf", "py", "txt") or folder path names as query when
-              a specific target term is present.
+     "query": core search term (e.g. "resume", "notes", "ModelRouter").
      "path": target root or nested folder constraint (e.g. "downloads/archived", "desktop").
      "file_extensions": optional array of extension filters (e.g. [".pdf"], [".py"]).
-     "search_mode": optional "discovery" (find files/folders by name) or "content".
-   Path shortcuts: "pc" (search all roots), "desktop", "downloads", "documents", or subpaths.
+     "search_mode": optional "discovery" or "content".
 
 3. file_read
-   Purpose: Read the contents of a safe text file on the user's PC or workspace.
-   Parameters: {"path": "desktop/resume.txt"}
+   Purpose: Read the contents of a safe text file, PDF document, or ZIP archive.
+   Parameters:
+     "path": target file path (e.g. "desktop/resume.pdf").
+     "content_scope": optional "entire_document", "page", "relevant", "metadata", "archive_listing".
+     "page_number": optional integer (1-indexed page number for PDFs).
+     "query": optional search query for relevant content filtering.
+
+4. file_send
+   Purpose: Prepare an actual file from PC/workspace to send as a chat document attachment.
+   Parameters:
+     "path": target file or folder path (e.g. "desktop/resume.pdf", "downloads/archived").
+     "query": optional filename or target keyword if path is a folder.
+
+5. web_search
+   Purpose: Search the live web for current news, weather, stock prices, or research.
+   Parameters:
+     "query": search query (e.g. "latest NVIDIA news", "weather in Hyderabad").
+     "recency_days": optional integer for recent filtering (e.g. 7).
+     "max_results": optional integer max count (e.g. 5).
+
+6. browser
+   Purpose: Control a live browser to open pages, click, type, scroll, or inspect.
+   Parameters:
+     "action": action name ("open", "navigate", "observe", "click", "type", "press", etc.).
+     "url": target URL (for "open" or "navigate").
+     "selector": CSS selector or element description (for "click" or "type").
+     "text": text to type (for "type").
+     "description": description or link text for click fallback.
+     "direction": "down" or "up" (for "scroll").
+     "key": key name e.g. "Enter" (for "press").
 
 INSTRUCTIONS:
-- You MUST invoke a tool whenever the user asks to read, search, view, or inspect local files.
+- You MUST invoke a tool when asked to send/read files, search the web, OR control a browser.
+- Intent Mapping:
+  - User asks to OPEN BROWSER, GO TO URL, CLICK, TYPE, SCROLL, TAKE SCREENSHOT -> output "browser".
+  - User asks to SEND, ATTACH, GIVE, or RETURN a file -> output "file_send".
+  - User asks to READ, EXTRACT, SUMMARIZE, or ASK ABOUT content -> output "file_read".
+  - User asks to FIND, LOCATE, or SEARCH local files -> output "file_search".
+  - User asks to SEARCH THE WEB or FIND LATEST/CURRENT info -> output "web_search".
 - Path Extraction Rules:
   - If user mentions nested folders (e.g. "inside Downloads Archived"), combine them into
     "path": "downloads/archived".
-  - Do NOT extract directory path names (e.g. "archived", "downloads") as the search query.
-- Query Extraction Rules:
-  - Extract the core target keyword (e.g. "resume") into query.
-  - Do NOT set query to generic extension words ("pdf", "file") when specific terms exist.
-- Extension Extraction Rules:
-  - Extract extension words ("pdf", "python", "txt") into "file_extensions": [".pdf"], [".py"].
 - Output ONLY valid JSON matching the schema:
-  {"tool_name": "file_search", "parameters": {"query": "resume",
-  "path": "downloads/archived", "file_extensions": [".pdf"], "search_mode": "discovery"}}
+  {"tool_name": "browser", "parameters": {"action": "navigate", "url": "https://google.com"}}
   or
-  {"tool_name": "file_read", "parameters": {"path": "desktop/notes.txt"}}
+  {"tool_name": "web_search", "parameters": {"query": "latest NVIDIA news"}}
+  or
+  {"tool_name": "file_send", "parameters": {"path": "downloads/archived/resume.pdf"}}
+  or
+  {"tool_name": "file_read", "parameters": {"path": "desktop/notes.txt",
+   "content_scope": "entire_document"}}
+  or
+  {"tool_name": "file_search", "parameters": {"query": "resume", "path": "downloads/archived"}}
   or
   {"tool_name": "system_info", "parameters": {"fields": ["os"]}}
 - Do NOT output explanations or markdown formatting outside the JSON object.
@@ -166,6 +197,37 @@ class ToolIntentPlanner:
                     logger.warning("ToolIntentPlanner: Invalid or missing path for file_read")
                     return None
                 parameters["path"] = raw_path.strip()
+
+            elif tool_name == "file_send":
+                raw_path: Any = parameters.get("path")
+                if not isinstance(raw_path, str) or not raw_path.strip():
+                    logger.warning("ToolIntentPlanner: Invalid or missing path for file_send")
+                    return None
+                parameters["path"] = raw_path.strip()
+
+            elif tool_name == "web_search":
+                raw_query: Any = parameters.get("query")
+                if not isinstance(raw_query, str) or not raw_query.strip():
+                    logger.warning("ToolIntentPlanner: Invalid or missing query for web_search")
+                    return None
+                parameters["query"] = raw_query.strip()
+                raw_recency: Any = parameters.get("recency_days")
+                if isinstance(raw_recency, int) and raw_recency > 0:
+                    parameters["recency_days"] = raw_recency
+                raw_max: Any = parameters.get("max_results")
+                if isinstance(raw_max, int) and raw_max > 0:
+                    parameters["max_results"] = raw_max
+
+            elif tool_name == "browser":
+                raw_action: Any = parameters.get("action")
+                if not isinstance(raw_action, str) or not raw_action.strip():
+                    # Infer navigate if url present, else observe
+                    if "url" in parameters:
+                        parameters["action"] = "navigate"
+                    else:
+                        parameters["action"] = "observe"
+                else:
+                    parameters["action"] = raw_action.strip().lower()
 
             logger.info(
                 "ToolIntentPlanner: Planned structured tool intent",

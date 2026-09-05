@@ -297,6 +297,29 @@ class TelegramAdapter(BaseInterfaceAdapter):
                     chunk_length=len(chunk),
                 )
         t_reply_ms = (time.monotonic() - t0_reply) * 1000.0
+
+        # Document attachment delivery if present in TaskResult (Correction #1)
+        if final_task_result is not None and final_task_result.file_attachments:
+            for att_path in final_task_result.file_attachments:
+                if att_path.exists() and att_path.is_file():
+                    try:
+                        with att_path.open("rb") as doc_file:
+                            await update.message.reply_document(
+                                document=doc_file, filename=att_path.name
+                            )
+                        logger.info(
+                            "[PROFILE] Telegram document attachment sent",
+                            chat_id=chat_id,
+                            file_name=att_path.name,
+                        )
+                    except Exception as att_err:
+                        logger.error(
+                            "Failed to send Telegram document attachment",
+                            chat_id=chat_id,
+                            file_name=att_path.name,
+                            error=str(att_err),
+                        )
+
         t_total_ms = (time.monotonic() - t0_recv) * 1000.0
 
         model_name = (
