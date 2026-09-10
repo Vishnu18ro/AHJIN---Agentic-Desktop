@@ -16,6 +16,8 @@ class StepResult(BaseModel):
     output_text: str | None = None
     error: AhjinError | None = None
     attachment_paths: list[Path] = Field(default_factory=list)  # pyright: ignore[reportUnknownVariableType]
+    tool_name: str | None = None
+    tool_duration_ms: float = 0.0
 
 
 class ExecutionState(BaseModel):

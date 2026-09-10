@@ -15,6 +15,20 @@ from ahjin.interfaces.base import BaseInterfaceAdapter
 from ahjin.interfaces.telegram.mapper import TelegramMapper
 from ahjin.models.health import ModelHealthStatus
 from ahjin.models.router import ModelRouter
+from ahjin.telemetry import (
+    STAGE_BERU_ANALYSIS,
+    STAGE_CONTEXT_ASSEMBLY,
+    STAGE_FINAL_RESPONSE_ASSEMBLY,
+    STAGE_MODEL_GENERATION,
+    STAGE_MODEL_ROUTING,
+    STAGE_PROVIDER_SETUP,
+    STAGE_STREAM_PROCESSING,
+    STAGE_TELEGRAM_DELIVERY,
+    STAGE_TELEGRAM_PLACEHOLDER,
+    STAGE_TELEGRAM_RECEIVE,
+    STAGE_TOOL_EXECUTION,
+    STAGE_TOOL_PLANNER,
+)
 
 logger = structlog.get_logger()
 
@@ -67,6 +81,20 @@ def _model_short_name(model_id: str) -> str:
     return label_map.get(model_id, model_id.split("/")[-1])
 
 
+TOOL_DISPLAY_MAP: dict[str, str] = {
+    "system_info": "System Info",
+    "file_search": "File Search",
+    "file_read": "File Read",
+    "file_send": "File Send",
+    "web_search": "Web Search",
+    "browser": "Browser",
+}
+
+
+def _tool_display_name(tool_name: str) -> str:
+    """Map tool snake_case identifier to a clean human-readable label."""
+    return TOOL_DISPLAY_MAP.get(tool_name, tool_name.replace("_", " ").title())
+
 
 def _health_icon(status: str) -> str:
     """Map health status string to a compact emoji indicator."""
@@ -78,32 +106,126 @@ def _health_icon(status: str) -> str:
 
 
 def _build_runtime_footer(info: RuntimeInfo) -> str:
-    """Build compact runtime observability footer from RuntimeInfo.
+    """Build simplified runtime observability footer from RuntimeInfo.
 
-    Only shows what was actually measured. Does not fabricate metrics.
+    Displays high-level execution timings in milliseconds:
+    - AHJIN: AHJIN orchestration only (BERU, context assembly, model routing, provider setup).
+    - Tool: Actual tool execution time (individual tool rows when tools ran).
+    - Model: Actual model/provider streaming or invocation execution time.
+    - Telegram: Telegram API delivery time (edit_text calls).
+    - Other: Residual = Total - AHJIN - Tools - Model - Telegram.
+              Only shown when measurable (> 50ms); covers unmeasured gaps such as
+              network TLS handshake before provider setup, context assembly not yet
+              instrumented, and inter-stage Python overhead.
+    - Total: Complete end-to-end elapsed time.
+
+    Detailed internal stages remain recorded in info.timing for diagnostics.
     Never exposes API keys, tokens, stack traces, or raw HTTP payloads.
     """
-    route_label = "↪ Rerouted" if info.was_rerouted else "Direct"
+    route_label = "\u21aa Rerouted" if info.was_rerouted else "Direct"
     health_icon = _health_icon(info.health_status)
 
     lines = [
-        "━━━━━━━━━━━━━━━━",
+        "━" * 18,
         "⚡ AHJIN Runtime",
         f"Model: {_model_short_name(info.selected_model)}",
         f"Route: {info.tier}",
-        f"AHJIN: {info.ahjin_internal_ms:.0f}ms",
-        f"Model: {info.model_api_ms:.0f}ms",
-        f"Total: {info.total_ms:.0f}ms",
-        f"Path:  {route_label}",
-        f"Health: {health_icon} {info.health_status.title()}",
+        "",
+        "⏱ Latency",
     ]
+
+    timing = info.timing
+    if timing:
+        # AHJIN orchestration overhead only (strictly disjoint from Tool & Model;
+        # tool_planner LLM duration is subtracted to avoid double counting, and
+        # telegram_receive is excluded from user-facing AHJIN per specification).
+        ahjin_ms = (
+            max(
+                timing.get(STAGE_BERU_ANALYSIS, 0.0)
+                - timing.get(STAGE_TOOL_PLANNER, 0.0),
+                0.0,
+            )
+            + timing.get(STAGE_CONTEXT_ASSEMBLY, 0.0)
+            + timing.get(STAGE_MODEL_ROUTING, 0.0)
+            + timing.get(STAGE_PROVIDER_SETUP, 0.0)
+        )
+        if ahjin_ms == 0.0 and info.ahjin_internal_ms > 0:
+            ahjin_ms = info.ahjin_internal_ms
+
+        model_ms = (
+            timing.get(STAGE_STREAM_PROCESSING, 0.0)
+            or timing.get(STAGE_MODEL_GENERATION, 0.0)
+            or info.model_api_ms
+        )
+        telegram_ms = timing.get(STAGE_TELEGRAM_DELIVERY, 0.0)
+    else:
+        ahjin_ms = info.ahjin_internal_ms
+        model_ms = info.model_api_ms
+        telegram_ms = 0.0
+
+    # Sum explicit per-tool durations for "other" budget calculation
+    tool_timings = info.tool_timings
+    total_tool_ms = sum(t_ms for _, t_ms in tool_timings) if tool_timings else (
+        timing.get(STAGE_TOOL_EXECUTION, 0.0) if timing else 0.0
+    )
+
+    lines.append(f"├─ AHJIN: {int(round(ahjin_ms))}ms")
+
+    # Tool execution latency (only if tools actually executed)
+    if tool_timings:
+        if len(tool_timings) == 1:
+            _, t_ms = tool_timings[0]
+            lines.append(f"├─ Tool: {int(round(t_ms))}ms")
+        else:
+            for t_name, t_ms in tool_timings:
+                disp_name = _tool_display_name(t_name)
+                lines.append(f"├─ {disp_name}: {int(round(t_ms))}ms")
+    elif timing and timing.get(STAGE_TOOL_EXECUTION, 0.0) > 0:
+        t_ms = timing.get(STAGE_TOOL_EXECUTION, 0.0)
+        lines.append(f"├─ Tool: {int(round(t_ms))}ms")
+
+    lines.append(f"├─ Model: {int(round(model_ms))}ms")
+
+    # Telegram delivery bucket (only when measured)
+    if telegram_ms > 0:
+        lines.append(f"├─ Telegram: {int(round(telegram_ms))}ms")
+
+    # "Other" residual bucket:
+    # Total - AHJIN - all tool execution - Model - Telegram
+    # Represents unmeasured gaps (provider TLS handshake, context assembly if untracked, etc.)
+    # Only shown when it exceeds 50ms to avoid noise from sub-millisecond Python overhead.
+    if info.total_ms > 0:
+        other_ms = info.total_ms - ahjin_ms - total_tool_ms - model_ms - telegram_ms
+        if other_ms > 50.0:
+            lines.append(f"├─ Other: {int(round(other_ms))}ms")
+
+    lines.append(f"└─ Total: {int(round(info.total_ms))}ms")
+
+    lines.append("")
+
+    # Tool metadata line (only when tool(s) executed)
+    if tool_timings:
+        disp_names = [_tool_display_name(t[0]) for t in tool_timings]
+        if len(disp_names) == 1:
+            lines.append(f"Tool: {disp_names[0]}")
+        else:
+            lines.append(f"Tools: {', '.join(disp_names)}")
+    elif info.executed_tools:
+        disp_names = [_tool_display_name(t) for t in info.executed_tools]
+        if len(disp_names) == 1:
+            lines.append(f"Tool: {disp_names[0]}")
+        else:
+            lines.append(f"Tools: {', '.join(disp_names)}")
+
+    lines.append(f"Path: {route_label}")
+    lines.append(f"Health: {health_icon} {info.health_status.title()}")
 
     if info.was_rerouted and info.failed_model:
         lines.append(f"From: {_model_short_name(info.failed_model)}")
         if info.failure_reason:
             lines.append(f"Reason: {info.failure_reason}")
 
-    lines.append("━━━━━━━━━━━━━━━━")
+    lines.append("━" * 18)
     return "\n".join(lines)
 
 
@@ -199,7 +321,9 @@ class TelegramAdapter(BaseInterfaceAdapter):
         t_map_ms = (time.monotonic() - t0_map) * 1000.0
 
         # 2. Send initial placeholder message
+        t0_placeholder = time.monotonic()
         placeholder_msg = await update.message.reply_text("Thinking...")
+        t_placeholder_ms = (time.monotonic() - t0_placeholder) * 1000.0
 
         accumulated_text = ""
         first_token_received = False
@@ -260,6 +384,7 @@ class TelegramAdapter(BaseInterfaceAdapter):
 
         t_dispatch_ms = (time.monotonic() - t0_dispatch) * 1000.0
 
+        t0_assembly = time.monotonic()
         # Build response & footer
         response_text = ""
         if final_task_result is not None:
@@ -267,14 +392,47 @@ class TelegramAdapter(BaseInterfaceAdapter):
         if not response_text:
             response_text = accumulated_text or "No response received."
 
+        # --- Single-message delivery: build footer BEFORE chunking ---
+        # We estimate STAGE_TELEGRAM_DELIVERY using the time elapsed since
+        # dispatch completed. This is slightly conservative but avoids needing
+        # a second message to carry the footer.
         footer = ""
-        if final_task_result is not None and final_task_result.runtime_info is not None:
-            total_wall_ms = (time.monotonic() - t0_recv) * 1000.0
-            patched_info = final_task_result.runtime_info.model_copy(
-                update={"total_ms": round(total_wall_ms, 1)}
+        runtime_info_snapshot = (
+            final_task_result.runtime_info
+            if final_task_result is not None and final_task_result.runtime_info is not None
+            else None
+        )
+
+        if runtime_info_snapshot is not None:
+            # Estimate total wall-clock at footer-build time (before final edit).
+            # STAGE_TELEGRAM_DELIVERY is estimated rather than exact to preserve
+            # the single-message UX: actual edit_text latency is typically 100-400ms
+            # and is a negligible fraction of the overall wall-clock total.
+            est_total_ms = (time.monotonic() - t0_recv) * 1000.0
+            # Rough estimate for Telegram API delivery: time since dispatch finished
+            est_telegram_ms = (time.monotonic() - t0_dispatch) * 1000.0 - t_dispatch_ms
+            t_assembly_ms = (time.monotonic() - t0_assembly) * 1000.0
+            updated_timing = dict(runtime_info_snapshot.timing)
+            updated_timing[STAGE_TELEGRAM_RECEIVE] = round(t_map_ms, 1)
+            updated_timing[STAGE_TELEGRAM_DELIVERY] = round(max(est_telegram_ms, 0.0), 1)
+            updated_timing[STAGE_TELEGRAM_PLACEHOLDER] = round(t_placeholder_ms, 1)
+            updated_timing[STAGE_FINAL_RESPONSE_ASSEMBLY] = round(t_assembly_ms, 1)
+            patched_info = runtime_info_snapshot.model_copy(
+                update={"total_ms": round(est_total_ms, 1), "timing": updated_timing}
             )
             footer = "\n\n" + _build_runtime_footer(patched_info)
 
+            logger.info(
+                "[PROFILE] Telegram internal latency telemetry",
+                chat_id=chat_id,
+                placeholder_ms=round(t_placeholder_ms, 1),
+                map_ms=round(t_map_ms, 1),
+                dispatch_ms=round(t_dispatch_ms, 1),
+                assembly_ms=round(t_assembly_ms, 1),
+                total_ms=round(est_total_ms, 1),
+            )
+
+        # Unify answer + footer in ONE message (historical single-message UX restored).
         full_text = response_text + footer
         chunks = _chunk_message(full_text)
 
@@ -298,7 +456,9 @@ class TelegramAdapter(BaseInterfaceAdapter):
                 )
         t_reply_ms = (time.monotonic() - t0_reply) * 1000.0
 
-        # Document attachment delivery if present in TaskResult (Correction #1)
+        # Document attachment delivery if present in TaskResult.
+        # Attachments are always separate messages (binary files cannot be
+        # embedded in text messages on Telegram by design).
         if final_task_result is not None and final_task_result.file_attachments:
             for att_path in final_task_result.file_attachments:
                 if att_path.exists() and att_path.is_file():
@@ -341,7 +501,7 @@ class TelegramAdapter(BaseInterfaceAdapter):
             telegram_send_ms=round(t_reply_ms, 3),
             total_end_to_end_ms=round(t_total_ms, 3),
             response_chunks=len(chunks),
-            response_total_chars=len(full_text),
+            response_total_chars=len(response_text),
             model_used=model_name,
             was_rerouted=was_rerouted,
         )

@@ -90,7 +90,15 @@ async def main() -> None:
     logger.info("AHJIN 2.0 initialization complete — Multi-Model Router ready")
 
     # --- Start interfaces ---
-    await adapter.start()
+    try:
+        await adapter.start()
+    finally:
+        for prov_id in ("nvidia", "openrouter", "ollama"):
+            try:
+                prov = registry.get_provider(prov_id)
+                await prov.aclose()
+            except KeyError:
+                pass
 
 
 if __name__ == "__main__":

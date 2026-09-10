@@ -101,7 +101,7 @@ async def test_simple_task_fast_tier_routing() -> None:
     footer = _build_runtime_footer(res.runtime_info)
     assert "Model: Nemotron Lightning 30B" in footer
     assert "Route: FAST" in footer
-    assert "Path:  Direct" in footer
+    assert "Path: Direct" in footer
     assert "Health: 🟢 Healthy" in footer
 
 
@@ -277,7 +277,7 @@ async def test_same_request_rerouting_observability() -> None:
     assert res.runtime_info.failure_reason == "network error"
 
     footer = _build_runtime_footer(res.runtime_info)
-    assert "Path:  ↪ Rerouted" in footer
+    assert "Path: ↪ Rerouted" in footer
     assert "From: failing-heavy-model" in footer
     assert "Reason: network error" in footer
 

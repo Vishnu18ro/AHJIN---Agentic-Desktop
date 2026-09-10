@@ -1,0 +1,86 @@
+﻿PHASE 4A — MODEL / PROVIDER FORENSICS SUMMARY
+==============================================
+Date: 2026-09-09
+System: AHJIN 2.0 (post-Phase 3A + 3B)
+Method: Read-only source inspection. No source code changes.
+
+------------------------------------------------------------------------
+CATALOG: 9 models registered
+------------------------------------------------------------------------
+FAST  tier (cloud):  nvidia/nemotron-3.5-lightning-30b-a3b  [nvidia, priority=200]
+FAST  tier (local):  gemma3:4b                              [ollama,  priority=100]
+
+HEAVY tier (cloud, by priority):
+  #1  minimax/minimax-m3:free                               [openrouter, priority=250] verified
+  #2  nvidia/nemotron-3-ultra-550b-a55b:free                [openrouter, priority=230] verified
+  #3  nvidia/nemotron-3-ultra-550b-a55b                     [nvidia,     priority=200] verified
+  #4  moonshotai/kimi-k3                                    [nvidia,     priority=170] NOT verified
+  #5  deepseek-ai/deepseek-v4-pro-0813                      [nvidia,     priority=150] NOT verified
+  #6  deepseek-ai/deepseek-v4-flash-0731                    [nvidia,     priority=130] NOT verified
+HEAVY tier (local):  qwen3:8b                               [ollama,  priority=120]
+
+------------------------------------------------------------------------
+EXACT NEMOTRON LIGHTNING REQUEST PAYLOAD (streaming)
+------------------------------------------------------------------------
+POST https://integrate.api.nvidia.com/v1/chat/completions
+Headers: Authorization: Bearer [REDACTED], Content-Type: application/json
+Body:
+  model: "nvidia/nemotron-3.5-lightning-30b-a3b"
+  messages: [system?, ...history, user]
+  temperature: 0.7  (hardcoded)
+  max_tokens: 4096  (default; from settings)
+  stream: true
+
+------------------------------------------------------------------------
+PROVIDER REGISTRATION (runtime)
+------------------------------------------------------------------------
+NvidiaProvider:      ALWAYS registered (startup fails if NVIDIA_API_KEY missing)
+OpenRouterProvider:  CONDITIONAL — only if OPENROUTER_API_KEY is set
+OllamaProvider:      CONDITIONAL — only if ollama_enabled=True (default)
+
+------------------------------------------------------------------------
+ALTERNATE NEMOTRON LIGHTNING PATH
+------------------------------------------------------------------------
+FINDING: NO existing alternate Nemotron Lightning provider path was found.
+Only one catalog entry exists for nvidia/nemotron-3.5-lightning-30b-a3b
+(provider_id="nvidia"). OpenRouter does not have this model in the catalog.
+
+------------------------------------------------------------------------
+KEY LATENCY FINDINGS
+------------------------------------------------------------------------
+1. AHJIN overhead: 0.3–2.3 ms — NOT the bottleneck (CONFIRMED)
+2. Reasoning duration: 55–71% of total wall time (CONFIRMED)
+3. HTTP pooling: Active for NVIDIA only; OpenRouter/Ollama create new client per call (CONFIRMED)
+4. Timeout: 90s for NVIDIA/OpenRouter; max observed was 82.8s (Phase 3B TEST_D) — tight headroom (RISK)
+5. Temperature 0.7 hardcoded — no per-request adaptability (CONFIRMED)
+6. Tool-resolved paths always get FAST tier regardless of task complexity (CONFIRMED — potential mismatch)
+7. reasoning_content intercepted and suppressed — 0/40 exposures (CONFIRMED)
+8. 3 HEAVY models (Kimi K3, DeepSeek Pro, DeepSeek Flash) have endpoint_verified=False (RISK)
+
+------------------------------------------------------------------------
+TIER ASSIGNMENT LOGIC (BERU)
+------------------------------------------------------------------------
+Tool-resolved requests          → always FAST (hardcoded)
+Keyword: explain/analyze/code   → HEAVY, quality preference
+Plain conversation (HI, etc.)   → FAST, speed preference
+
+IMPLICATION: "find my resume and summarize it" routes to FAST (Nemotron Lightning)
+because file_search is detected deterministically, overriding keyword analysis.
+
+------------------------------------------------------------------------
+RECOMMENDED PHASE 4B EXPERIMENT
+------------------------------------------------------------------------
+Test: Route Nemotron Lightning through OpenRouter vs NVIDIA Direct
+Compare: http_connect_ms, ttft_ms, reasoning_dur_ms, total_wall_ms
+Runs: 10 per path, interleaved, same prompt
+Changes needed:
+  1. Add OpenRouter catalog entry for nemotron-3.5-lightning-30b-a3b (priority=190)
+  2. Add streaming telemetry to OpenRouterProvider
+  3. Write benchmark_phase4b.py using excluded_model_ids to force each path
+Production routing: UNCHANGED (lower priority = never selected in production)
+
+------------------------------------------------------------------------
+SOURCE CODE CHANGED: NO
+ROUTING CHANGED: NO
+ALTERNATE PATH FOUND: NO
+------------------------------------------------------------------------

@@ -37,9 +37,36 @@ from ahjin.local.executor import LocalExecutor
 from ahjin.local.types import LocalExecutionError, LocalExecutionResult, LocalRoutingSkipped
 from ahjin.models.router import CapabilityUnavailableError
 from ahjin.security.gate import PermissionGate
+from ahjin.telemetry import (
+    STAGE_CONTEXT_ASSEMBLY,
+    STAGE_MODEL_GENERATION,
+    STAGE_MODEL_ROUTING,
+    STAGE_PROVIDER_SETUP,
+    STAGE_STREAM_PROCESSING,
+    STAGE_TIME_TO_FIRST_TOKEN,
+    STAGE_TOOL_EXECUTION,
+    RequestTimer,
+)
 from ahjin.tools.registry import ToolRegistry
 
 logger = structlog.get_logger()
+
+
+def _extract_tool_metadata(
+    state_step_results: list[StepResult], timer: RequestTimer | None
+) -> tuple[list[tuple[str, float]], list[str]]:
+    """Extract ordered tool execution timings and names from timer or state results."""
+    timings = (
+        timer.get_tool_timings()
+        if timer is not None and timer.get_tool_timings()
+        else [
+            (s.tool_name, s.tool_duration_ms)
+            for s in state_step_results
+            if s.tool_name is not None
+        ]
+    )
+    names = [t[0] for t in timings]
+    return timings, names
 
 
 class HarnessRunner:
@@ -65,7 +92,12 @@ class HarnessRunner:
         self.tool_registry = tool_registry
         self.permission_gate = permission_gate
 
-    async def run(self, plan: ExecutionPlan, context: TaskContext) -> TaskResult:
+    async def run(
+        self,
+        plan: ExecutionPlan,
+        context: TaskContext,
+        timer: RequestTimer | None = None,
+    ) -> TaskResult:
         """Run execution plan steps sequentially with same-request failure recovery."""
         logger.info("Harness running plan", plan_id=str(plan.plan_id), steps=len(plan.steps))
         state = ExecutionState(task_id=plan.task_id, plan_id=plan.plan_id)
@@ -84,6 +116,8 @@ class HarnessRunner:
                 require_verification: bool = strategy.require_verification
                 recovery_policy: RecoveryPolicy = strategy.recovery_policy
 
+                if timer is not None:
+                    timer.start_stage(STAGE_CONTEXT_ASSEMBLY)
                 t0_ctx = time.monotonic()
                 prompt = self.context_assembler.assemble(
                     intent=intent,
@@ -91,6 +125,8 @@ class HarnessRunner:
                     prior_results=state.step_results,
                 )
                 t_ctx_ms = (time.monotonic() - t0_ctx) * 1000.0
+                if timer is not None:
+                    timer.end_stage(STAGE_CONTEXT_ASSEMBLY)
                 logger.info(
                     "[PROFILE] ContextAssembler execution",
                     step_id=str(step.step_id),
@@ -124,6 +160,43 @@ class HarnessRunner:
                                 excluded_model_ids=excluded_models,
                             )
                             t_gw_ms = (time.monotonic() - t0_gw) * 1000.0
+                            if timer is not None:
+                                # model_routing: only the ModelRouter.select_model() time,
+                                # already measured inside the router and exposed on selection.
+                                timer.record(
+                                    STAGE_MODEL_ROUTING,
+                                    gw_result.selection.selection_time_ms,
+                                )
+                                # model_generation: the actual provider HTTP round-trip.
+                                timer.record(
+                                    STAGE_MODEL_GENERATION,
+                                    gw_result.response.latency_ms,
+                                )
+                                # provider_setup: gateway overhead that is neither router
+                                # selection nor provider generation (HTTP client init,
+                                # request serialisation, provider lookup, etc.).
+                                provider_setup_ms = (
+                                    t_gw_ms
+                                    - gw_result.selection.selection_time_ms
+                                    - gw_result.response.latency_ms
+                                )
+                                if provider_setup_ms > 0:
+                                    timer.record(STAGE_PROVIDER_SETUP, provider_setup_ms)
+                                # Attach internal provider telemetry if available
+                                try:
+                                    prov_id = gw_result.selection.provider_id
+                                    prov = self.gateway.registry.get_provider(prov_id)
+                                    last_tel: Any = getattr(prov, "last_telemetry", None)
+                                    if isinstance(last_tel, dict):
+                                        tel_dict: dict[str, float] = (
+                                            cast(dict[str, float], last_tel)
+                                        )
+                                        for stage_k, stage_v in tel_dict.items():
+                                            timer.record(str(stage_k), float(stage_v))
+                                except Exception:
+                                    pass
+                                # time_to_first_token: not applicable for non-streaming invoke.
+                                # Left unrecorded; footer will show SKIPPED for this stage.
                             response = gw_result.response
                             selection = gw_result.selection
 
@@ -157,6 +230,9 @@ class HarnessRunner:
                             health_state = self.gateway.router.health_tracker.get_state(
                                 response.model_id
                             )
+                            tool_timings, executed_tools = _extract_tool_metadata(
+                                state.step_results, timer
+                            )
                             runtime_info = RuntimeInfo(
                                 selected_model=response.model_id,
                                 tier=selection.tier.value,
@@ -164,6 +240,8 @@ class HarnessRunner:
                                 ahjin_internal_ms=round(max(ahjin_overhead_ms, 0.0), 1),
                                 model_api_ms=round(response.latency_ms, 1),
                                 total_ms=round(step_total_ms, 1),
+                                tool_timings=tool_timings,
+                                executed_tools=executed_tools,
                                 was_rerouted=(first_failed_model is not None),
                                 failed_model=first_failed_model,
                                 failure_reason=first_failure_reason,
@@ -214,6 +292,9 @@ class HarnessRunner:
                             strategy=strategy,
                         )
                         step_total_ms = local_result.latency_ms
+                        tool_timings, executed_tools = _extract_tool_metadata(
+                            state.step_results, timer
+                        )
                         runtime_info = RuntimeInfo(
                             selected_model=local_result.model_used,
                             tier=(
@@ -225,6 +306,8 @@ class HarnessRunner:
                             ahjin_internal_ms=0.0,
                             model_api_ms=round(local_result.latency_ms, 1),
                             total_ms=round(step_total_ms, 1),
+                            tool_timings=tool_timings,
+                            executed_tools=executed_tools,
                             was_rerouted=(
                             local_result.used_fallback
                             or (first_failed_model is not None)
@@ -288,7 +371,16 @@ class HarnessRunner:
                         error=err,
                     )
             elif step.step_type == StepType.TOOL_INVOCATION:
+                t0_tool = time.perf_counter()
+                if timer is not None:
+                    timer.start_stage(STAGE_TOOL_EXECUTION)
                 step_res = await self._execute_tool_step(step)
+                tool_elapsed_ms = (time.perf_counter() - t0_tool) * 1000.0
+                step_res.tool_duration_ms = tool_elapsed_ms
+                if timer is not None:
+                    timer.end_stage(STAGE_TOOL_EXECUTION)
+                    tool_name = step.tool_intent.tool_name if step.tool_intent else "tool"
+                    timer.record_tool(tool_name, tool_elapsed_ms)
                 state.step_results.append(step_res)
                 if step_res.output_text is not None:
                     last_output = step_res.output_text
@@ -303,7 +395,10 @@ class HarnessRunner:
         )
 
     async def run_stream(
-        self, plan: ExecutionPlan, context: TaskContext
+        self,
+        plan: ExecutionPlan,
+        context: TaskContext,
+        timer: RequestTimer | None = None,
     ) -> AsyncGenerator[tuple[str, TaskResult | None], None]:
         """Run execution plan steps with progressive streaming of output chunks."""
         logger.info(
@@ -326,11 +421,15 @@ class HarnessRunner:
                 require_verification: bool = strategy.require_verification
                 recovery_policy: RecoveryPolicy = strategy.recovery_policy
 
+                if timer is not None:
+                    timer.start_stage(STAGE_CONTEXT_ASSEMBLY)
                 prompt = self.context_assembler.assemble(
                     intent=intent,
                     task_context=context,
                     prior_results=state.step_results,
                 )
+                if timer is not None:
+                    timer.end_stage(STAGE_CONTEXT_ASSEMBLY)
 
                 excluded_models: set[str] = set()
                 attempts = 0
@@ -349,17 +448,60 @@ class HarnessRunner:
                         try:
                             accumulated_content: list[str] = []
                             last_selection = None
+                            t0_stream = time.monotonic()
+                            first_token = True
+                            t0_first_token: float = t0_stream  # wall-clock when stream call starts
 
                             async for chunk, selection in self.gateway.invoke_stream(
                                 prompt=prompt,
                                 requirements=strategy,
                                 excluded_model_ids=excluded_models,
                             ):
+                                if first_token:
+                                    t_first_token = time.monotonic()
+                                    if timer is not None:
+                                        # model_routing: pure ModelRouter.select_model() time,
+                                        # already measured by the router; exposed on selection.
+                                        timer.record(
+                                            STAGE_MODEL_ROUTING,
+                                            selection.selection_time_ms,
+                                        )
+                                        # time_to_first_token: wall time from invoke_stream()
+                                        # call until first content chunk arrives in the runner.
+                                        # Includes HTTP connection + provider_setup internally,
+                                        # but provider_setup cannot be exposed without modifying
+                                        # the provider — left SKIPPED in footer.
+                                        ttft_ms = (t_first_token - t0_first_token) * 1000.0
+                                        timer.record(STAGE_TIME_TO_FIRST_TOKEN, ttft_ms)
+                                    first_token = False
                                 last_selection = selection
                                 accumulated_content.append(chunk)
                                 yield chunk, None
 
                             full_response = "".join(accumulated_content)
+                            t_stream_ms = (time.monotonic() - t0_stream) * 1000.0
+                            if timer is not None:
+                                # model_generation: time from first token to last token.
+                                t_first_token_elapsed = timer.get(STAGE_TIME_TO_FIRST_TOKEN)
+                                model_gen_ms = t_stream_ms - t_first_token_elapsed
+                                if model_gen_ms > 0:
+                                    timer.record(STAGE_MODEL_GENERATION, model_gen_ms)
+                                # stream_processing: total wall-clock for the entire stream.
+                                timer.record(STAGE_STREAM_PROCESSING, t_stream_ms)
+                                # Attach internal provider telemetry if available
+                                if last_selection is not None:
+                                    try:
+                                        prov_id = last_selection.provider_id
+                                        prov = self.gateway.registry.get_provider(prov_id)
+                                        last_tel: Any = getattr(prov, "last_telemetry", None)
+                                        if isinstance(last_tel, dict):
+                                            tel_dict: dict[str, float] = (
+                                                cast(dict[str, float], last_tel)
+                                            )
+                                            for stage_k, stage_v in tel_dict.items():
+                                                timer.record(str(stage_k), float(stage_v))
+                                    except Exception:
+                                        pass
                             if require_verification:
                                 ver_res = self.verifier.verify(full_response)
                                 if not ver_res.is_valid:
@@ -382,13 +524,18 @@ class HarnessRunner:
                                 health_state = self.gateway.router.health_tracker.get_state(
                                     last_selection.model_id
                                 )
+                                tool_timings, executed_tools = _extract_tool_metadata(
+                                    state.step_results, timer
+                                )
                                 runtime_info = RuntimeInfo(
                                     selected_model=last_selection.model_id,
                                     tier=last_selection.tier.value,
                                     provider_id=last_selection.provider_id,
                                     ahjin_internal_ms=0.0,
-                                    model_api_ms=round(step_total_ms, 1),
+                                    model_api_ms=round(t_stream_ms, 1),
                                     total_ms=round(step_total_ms, 1),
+                                    tool_timings=tool_timings,
+                                    executed_tools=executed_tools,
                                     was_rerouted=(first_failed_model is not None),
                                     failed_model=first_failed_model,
                                     failure_reason=first_failure_reason,
@@ -434,6 +581,9 @@ class HarnessRunner:
 
                         if last_local_result:
                             step_total_ms = last_local_result.latency_ms
+                            tool_timings, executed_tools = _extract_tool_metadata(
+                                state.step_results, timer
+                            )
                             runtime_info = RuntimeInfo(
                                 selected_model=last_local_result.model_used,
                                 tier=(
@@ -445,6 +595,8 @@ class HarnessRunner:
                                 ahjin_internal_ms=0.0,
                                 model_api_ms=round(last_local_result.latency_ms, 1),
                                 total_ms=round(step_total_ms, 1),
+                                tool_timings=tool_timings,
+                                executed_tools=executed_tools,
                                 was_rerouted=(
                                     last_local_result.used_fallback
                                     or (first_failed_model is not None)
@@ -499,7 +651,16 @@ class HarnessRunner:
                     yield "", final_task_result
                     return
             elif step.step_type == StepType.TOOL_INVOCATION:
+                t0_tool = time.perf_counter()
+                if timer is not None:
+                    timer.start_stage(STAGE_TOOL_EXECUTION)
                 step_res = await self._execute_tool_step(step)
+                tool_elapsed_ms = (time.perf_counter() - t0_tool) * 1000.0
+                step_res.tool_duration_ms = tool_elapsed_ms
+                if timer is not None:
+                    timer.end_stage(STAGE_TOOL_EXECUTION)
+                    tool_name = step.tool_intent.tool_name if step.tool_intent else "tool"
+                    timer.record_tool(tool_name, tool_elapsed_ms)
                 state.step_results.append(step_res)
                 if step_res.output_text is not None:
                     last_output = step_res.output_text
@@ -581,6 +742,7 @@ class HarnessRunner:
                 output_text=output_str,
                 error=res.error,
                 attachment_paths=attachment_paths,
+                tool_name=tool_name,
             )
         except Exception as exc:
             logger.error(

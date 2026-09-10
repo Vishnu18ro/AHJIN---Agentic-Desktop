@@ -18,7 +18,7 @@ from ahjin.providers.types import (
     ModelInvocationResponse,
 )
 from ahjin.security.allow_all import AllowAllPermissionGate
-from ahjin.tools import FileReadTool, FileSearchTool, ToolRegistry
+from ahjin.tools import FileReadTool, FileSearchTool, FileSendTool, ToolRegistry
 from ahjin.tools.system_info import SystemInfoTool
 
 
@@ -288,3 +288,381 @@ async def test_llm_planner_nested_discovery_extraction() -> None:
     assert req.parameters["path"] == "downloads/archived"
     assert req.parameters["file_extensions"] == [".pdf"]
 
+
+# --- 6. Tool Screening & Timeout Tests ---
+
+def test_may_require_tool_screening() -> None:
+    from ahjin.beru.tools import may_require_tool
+
+    # Ordinary conversation / Q&A -> False (skip LLM planner)
+    assert may_require_tool("hi") is False
+    assert may_require_tool("hello") is False
+    assert may_require_tool("what is machine learning?") is False
+    assert may_require_tool("explain transformers") is False
+
+    # Tool-potential requests -> True (run planner / resolver)
+    assert may_require_tool("what OS am I using?") is True
+    assert may_require_tool("find my resume") is True
+    assert may_require_tool("send my resume") is True
+    assert may_require_tool("search the web for NVIDIA") is True
+    assert may_require_tool("open WhatsApp") is True
+    assert may_require_tool("read page 3 of my resume") is True
+
+
+@pytest.mark.asyncio
+async def test_tool_planner_times_out_gracefully() -> None:
+    import asyncio
+
+    class SlowProvider(BaseModelProvider):
+        @property
+        def provider_id(self) -> str:
+            return "slow_provider"
+
+        def get_default_model_id(self) -> str:
+            return "slow-model"
+
+        async def invoke(self, request: ModelInvocationRequest) -> ModelInvocationResponse:
+            await asyncio.sleep(2.0)
+            return ModelInvocationResponse(
+                invocation_id=request.invocation_id,
+                content='{"tool_name": "system_info", "parameters": {"fields": ["os"]}}',
+                provider_id=self.provider_id,
+                model_id=request.model_id,
+            )
+
+    provider = SlowProvider()
+    catalog = ModelCatalog()
+    catalog.register(
+        ModelDescriptor(
+            model_id=provider.get_default_model_id(),
+            provider_id=provider.provider_id,
+            tier=ModelTier.FAST,
+            capabilities=ModelCapabilities(),
+        )
+    )
+    registry = ProviderRegistry()
+    registry.register(provider)
+    router = ModelRouter(catalog=catalog)
+    gateway = ProviderGateway(registry=registry, router=router)
+    tool_registry = ToolRegistry()
+    tool_registry.register(SystemInfoTool())
+
+    # Set planner_timeout to 0.1s so it times out quickly
+    planner = ToolIntentPlanner(gateway=gateway, tool_registry=tool_registry, planner_timeout=0.1)
+    req = await planner.plan_tool_intent("What operating system am I using?")
+
+    # Timeout must return None gracefully without throwing
+    assert req is None
+
+
+# --- 7. File Search Chaining and Deterministic Fallback Tests ---
+
+@pytest.mark.asyncio
+async def test_beru_plan_file_search_primary_and_read() -> None:
+    """find my resume and summarize it -> file_search -> file_read -> model."""
+    json_resp = '{"tool_name": "file_search", "parameters": {"query": "resume", "path": "."}}'
+    gateway = _build_mock_planner_gateway(json_resp)
+    tool_registry = ToolRegistry()
+    tool_registry.register(FileSearchTool())
+    tool_registry.register(FileReadTool())
+    planner = ToolIntentPlanner(gateway=gateway, tool_registry=tool_registry)
+    orchestrator = BeruOrchestrator(tool_planner=planner)
+
+    request = _make_request("find my resume and summarize it")
+    plan = await orchestrator.plan(request)
+
+    assert len(plan.steps) == 3
+    assert plan.steps[0].step_type == StepType.TOOL_INVOCATION
+    assert plan.steps[0].tool_intent is not None
+    assert plan.steps[0].tool_intent.tool_name == "file_search"
+    assert plan.steps[1].step_type == StepType.TOOL_INVOCATION
+    assert plan.steps[1].tool_intent is not None
+    assert plan.steps[1].tool_intent.tool_name == "file_read"
+    assert plan.steps[2].step_type == StepType.MODEL_INVOCATION
+
+
+@pytest.mark.asyncio
+async def test_beru_plan_file_search_primary_and_send() -> None:
+    """find my resume and send me the file -> file_search -> file_send -> model."""
+    json_resp = '{"tool_name": "file_search", "parameters": {"query": "resume", "path": "."}}'
+    gateway = _build_mock_planner_gateway(json_resp)
+    tool_registry = ToolRegistry()
+    tool_registry.register(FileSearchTool())
+    tool_registry.register(FileSendTool())
+    planner = ToolIntentPlanner(gateway=gateway, tool_registry=tool_registry)
+    orchestrator = BeruOrchestrator(tool_planner=planner)
+
+    request = _make_request("find my resume and send me the file")
+    plan = await orchestrator.plan(request)
+
+    assert len(plan.steps) == 3
+    assert plan.steps[0].step_type == StepType.TOOL_INVOCATION
+    assert plan.steps[0].tool_intent is not None
+    assert plan.steps[0].tool_intent.tool_name == "file_search"
+    assert plan.steps[1].step_type == StepType.TOOL_INVOCATION
+    assert plan.steps[1].tool_intent is not None
+    assert plan.steps[1].tool_intent.tool_name == "file_send"
+    assert plan.steps[2].step_type == StepType.MODEL_INVOCATION
+
+
+@pytest.mark.asyncio
+async def test_beru_plan_file_search_read_and_send() -> None:
+    """find my resume, summarize it, and send me the file.
+    Expected: file_search -> file_read -> file_send -> model.
+    """
+    json_resp = '{"tool_name": "file_search", "parameters": {"query": "resume", "path": "."}}'
+    gateway = _build_mock_planner_gateway(json_resp)
+    tool_registry = ToolRegistry()
+    tool_registry.register(FileSearchTool())
+    tool_registry.register(FileReadTool())
+    tool_registry.register(FileSendTool())
+    planner = ToolIntentPlanner(gateway=gateway, tool_registry=tool_registry)
+    orchestrator = BeruOrchestrator(tool_planner=planner)
+
+    request = _make_request("find my resume, summarize it, and send me the file")
+    plan = await orchestrator.plan(request)
+
+    assert len(plan.steps) == 4
+    assert plan.steps[0].step_type == StepType.TOOL_INVOCATION
+    assert plan.steps[0].tool_intent is not None
+    assert plan.steps[0].tool_intent.tool_name == "file_search"
+    assert plan.steps[1].step_type == StepType.TOOL_INVOCATION
+    assert plan.steps[1].tool_intent is not None
+    assert plan.steps[1].tool_intent.tool_name == "file_read"
+    assert plan.steps[2].step_type == StepType.TOOL_INVOCATION
+    assert plan.steps[2].tool_intent is not None
+    assert plan.steps[2].tool_intent.tool_name == "file_send"
+    assert plan.steps[3].step_type == StepType.MODEL_INVOCATION
+
+
+def test_deterministic_file_search_fallback() -> None:
+    from ahjin.beru.tools import detect_tool_intent
+
+    req = detect_tool_intent("find my resume")
+    assert req is not None
+    assert req.tool_name == "file_search"
+    assert req.parameters["query"] == "resume"
+    assert req.parameters["path"] == "."
+
+
+def test_deterministic_file_search_with_folder() -> None:
+    from ahjin.beru.tools import detect_tool_intent
+
+    req = detect_tool_intent("find my resume inside the archived folder")
+    assert req is not None
+    assert req.tool_name == "file_search"
+    assert req.parameters["query"] == "resume"
+    assert req.parameters["path"] == "downloads/archived"
+
+
+def test_deterministic_file_search_complex_phrase() -> None:
+    from ahjin.beru.tools import detect_tool_intent
+
+    req = detect_tool_intent("find my resume and summarize it")
+    assert req is not None
+    assert req.tool_name == "file_search"
+    assert req.parameters["query"] == "resume"
+
+    req2 = detect_tool_intent("where is my contract on desktop")
+    assert req2 is not None
+    assert req2.tool_name == "file_search"
+    assert req2.parameters["query"] == "contract"
+    assert req2.parameters["path"] == "desktop"
+
+
+# ---------------------------------------------------------------------------
+# Phase 2 Regression Tests: Deterministic Bypass & Planner Invocation Control
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_deterministic_os_query_bypasses_planner() -> None:
+    """'what OS am I using?' must hit detect_tool_intent() and NEVER invoke the LLM planner.
+
+    Phase 2 latency optimization: once detect_tool_intent() returns system_info,
+    the orchestrator must short-circuit and not call ToolIntentPlanner.plan_tool_intent().
+    """
+    # Build a planner that records whether it was invoked
+    planner_invoked = []
+
+    class TrackingPlannerProvider(BaseModelProvider):
+        @property
+        def provider_id(self) -> str:
+            return "tracking_planner"
+
+        def get_default_model_id(self) -> str:
+            return "tracking-model"
+
+        async def invoke(self, request: ModelInvocationRequest) -> ModelInvocationResponse:
+            planner_invoked.append(True)
+            return ModelInvocationResponse(
+                invocation_id=request.invocation_id,
+                content='{"tool_name": "system_info", "parameters": {"fields": ["os"]}}',
+                provider_id=self.provider_id,
+                model_id=request.model_id,
+            )
+
+    provider = TrackingPlannerProvider()
+    catalog = ModelCatalog()
+    catalog.register(
+        ModelDescriptor(
+            model_id=provider.get_default_model_id(),
+            provider_id=provider.provider_id,
+            tier=ModelTier.FAST,
+            capabilities=ModelCapabilities(),
+        )
+    )
+    registry = ProviderRegistry()
+    registry.register(provider)
+    router = ModelRouter(catalog=catalog)
+    gateway = ProviderGateway(registry=registry, router=router)
+
+    tool_registry = ToolRegistry()
+    tool_registry.register(SystemInfoTool())
+
+    planner = ToolIntentPlanner(gateway=gateway, tool_registry=tool_registry)
+    orchestrator = BeruOrchestrator(tool_planner=planner)
+
+    request = _make_request("what OS am I using?")
+    plan = await orchestrator.plan(request)
+
+    # Planner must NOT have been invoked (deterministic bypass)
+    assert planner_invoked == [], (
+        "LLM ToolIntentPlanner was incorrectly invoked for a deterministically-matchable "
+        "OS query. Phase 2 requires detect_tool_intent() to short-circuit the planner."
+    )
+
+    # Plan must still correctly call system_info tool
+    assert len(plan.steps) == 2
+    assert plan.steps[0].step_type == StepType.TOOL_INVOCATION
+    assert plan.steps[0].tool_intent is not None
+    assert plan.steps[0].tool_intent.tool_name == "system_info"
+    assert plan.steps[1].step_type == StepType.MODEL_INVOCATION
+
+
+@pytest.mark.asyncio
+async def test_ambiguous_query_still_invokes_planner() -> None:
+    """Ambiguous tool-potential requests (not matched by detect_tool_intent) must
+    still invoke the LLM planner when may_require_tool() returns True.
+
+    This verifies that the Phase 2 deterministic bypass does NOT accidentally
+    disable the LLM planner for genuinely ambiguous inputs.
+    """
+    planner_invoked = []
+
+    class TrackingPlannerProvider(BaseModelProvider):
+        @property
+        def provider_id(self) -> str:
+            return "tracking_planner2"
+
+        def get_default_model_id(self) -> str:
+            return "tracking-model-2"
+
+        async def invoke(self, request: ModelInvocationRequest) -> ModelInvocationResponse:
+            planner_invoked.append(True)
+            # Return a valid file_search response
+            return ModelInvocationResponse(
+                invocation_id=request.invocation_id,
+                content='{"tool_name": "file_search", "parameters": {"query": "contract", "path": "documents"}}',
+                provider_id=self.provider_id,
+                model_id=request.model_id,
+            )
+
+    provider = TrackingPlannerProvider()
+    catalog = ModelCatalog()
+    catalog.register(
+        ModelDescriptor(
+            model_id=provider.get_default_model_id(),
+            provider_id=provider.provider_id,
+            tier=ModelTier.FAST,
+            capabilities=ModelCapabilities(),
+        )
+    )
+    registry = ProviderRegistry()
+    registry.register(provider)
+    router = ModelRouter(catalog=catalog)
+    gateway = ProviderGateway(registry=registry, router=router)
+
+    tool_registry = ToolRegistry()
+    tool_registry.register(FileSearchTool())
+
+    planner = ToolIntentPlanner(gateway=gateway, tool_registry=tool_registry)
+    orchestrator = BeruOrchestrator(tool_planner=planner)
+
+    # "I need my contract document" does not match any deterministic prefix pattern
+    # but has tool-potential keywords ("document"), so planner SHOULD be invoked.
+    request = _make_request("I need my contract document")
+    plan = await orchestrator.plan(request)
+
+    # Planner MUST have been invoked (ambiguous = needs LLM)
+    assert planner_invoked, (
+        "LLM ToolIntentPlanner was NOT invoked for an ambiguous tool-potential query. "
+        "Phase 2 changes must still route ambiguous requests to the planner."
+    )
+    # Plan should contain a file_search tool step (from planner response)
+    tool_steps = [s for s in plan.steps if s.step_type == StepType.TOOL_INVOCATION]
+    assert len(tool_steps) >= 1
+    assert tool_steps[0].tool_intent is not None
+    assert tool_steps[0].tool_intent.tool_name == "file_search"
+
+
+@pytest.mark.asyncio
+async def test_hi_uses_exactly_one_model_invocation_zero_planner() -> None:
+    """'HI' must: skip LLM planner, produce exactly 1 model step, zero tool steps.
+
+    This is success criterion [1] from Phase 2: 'HI' uses exactly ONE runtime
+    LLM invocation (the response model call). The tool planner must NOT be invoked.
+    """
+    planner_invoked = []
+
+    class TrackingPlannerProvider(BaseModelProvider):
+        @property
+        def provider_id(self) -> str:
+            return "tracking_hi_planner"
+
+        def get_default_model_id(self) -> str:
+            return "tracking-hi-model"
+
+        async def invoke(self, request: ModelInvocationRequest) -> ModelInvocationResponse:
+            planner_invoked.append(True)
+            return ModelInvocationResponse(
+                invocation_id=request.invocation_id,
+                content="{}",
+                provider_id=self.provider_id,
+                model_id=request.model_id,
+            )
+
+    provider = TrackingPlannerProvider()
+    catalog = ModelCatalog()
+    catalog.register(
+        ModelDescriptor(
+            model_id=provider.get_default_model_id(),
+            provider_id=provider.provider_id,
+            tier=ModelTier.FAST,
+            capabilities=ModelCapabilities(),
+        )
+    )
+    registry = ProviderRegistry()
+    registry.register(provider)
+    router = ModelRouter(catalog=catalog)
+    gateway = ProviderGateway(registry=registry, router=router)
+
+    tool_registry = ToolRegistry()
+    tool_registry.register(SystemInfoTool())
+
+    planner = ToolIntentPlanner(gateway=gateway, tool_registry=tool_registry)
+    orchestrator = BeruOrchestrator(tool_planner=planner)
+
+    request = _make_request("HI")
+    plan = await orchestrator.plan(request)
+
+    # Zero planner invocations
+    assert planner_invoked == [], (
+        "LLM ToolIntentPlanner was invoked for 'HI'. "
+        "Plain conversation must NOT trigger the tool planner."
+    )
+
+    # Zero tool steps, exactly 1 model step
+    tool_steps = [s for s in plan.steps if s.step_type == StepType.TOOL_INVOCATION]
+    model_steps = [s for s in plan.steps if s.step_type == StepType.MODEL_INVOCATION]
+    assert len(tool_steps) == 0, f"Expected 0 tool steps for 'HI', got {len(tool_steps)}"
+    assert len(model_steps) == 1, f"Expected 1 model step for 'HI', got {len(model_steps)}"

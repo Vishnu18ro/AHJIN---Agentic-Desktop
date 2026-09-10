@@ -32,3 +32,7 @@ class BaseModelProvider(ABC):
         res = await self.invoke(request)
         yield res.content
 
+    async def aclose(self) -> None:
+        """Close any underlying network clients or resources cleanly."""
+        return None
+

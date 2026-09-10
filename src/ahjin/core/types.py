@@ -95,6 +95,11 @@ class RuntimeInfo(BaseModel):
     ahjin_internal_ms: float = 0.0    # BERU + routing overhead
     model_api_ms: float = 0.0         # provider round-trip only
     total_ms: float = 0.0             # full request time
+    # Detailed per-stage breakdown from RequestTimer (optional; empty dict if unavailable)
+    timing: dict[str, float] = Field(default_factory=dict)  # pyright: ignore[reportUnknownVariableType]
+    # Individual executed tools and their respective durations in ms
+    tool_timings: list[tuple[str, float]] = Field(default_factory=list)  # pyright: ignore[reportUnknownVariableType]
+    executed_tools: list[str] = Field(default_factory=list)  # pyright: ignore[reportUnknownVariableType]
     # Rerouting
     was_rerouted: bool = False
     failed_model: str | None = None

@@ -20,7 +20,7 @@ from typing import TYPE_CHECKING
 
 import structlog
 
-from ahjin.beru.tools import detect_tool_intent
+from ahjin.beru.tools import detect_tool_intent, may_require_tool
 from ahjin.beru.types import (
     CapabilityRequirements,
     ExecutionPlan,
@@ -32,6 +32,13 @@ from ahjin.beru.types import (
 )
 from ahjin.core.types import TaskRequest
 from ahjin.models.types import ModelTier
+from ahjin.telemetry import (
+    STAGE_BERU_ANALYSIS,
+    STAGE_TOOL_PLANNER,
+    STAGE_TOOL_RESOLVER,
+    STAGE_TOOL_SCREENING,
+    RequestTimer,
+)
 from ahjin.tools.base import ToolInvocationRequest
 
 if TYPE_CHECKING:
@@ -116,20 +123,47 @@ class BeruOrchestrator:
             requires_vision=requires_vision,
         )
 
-    async def plan(self, request: TaskRequest) -> ExecutionPlan:
+    async def plan(
+        self,
+        request: TaskRequest,
+        timer: RequestTimer | None = None,
+    ) -> ExecutionPlan:
         """Analyze TaskRequest and produce ExecutionPlan with ExecutionStrategy."""
         t0 = time.monotonic()
         text = request.intent.primary_text
         logger.info("[PROFILE] BERU planning start", task_id=str(request.task_id))
 
-        # 1. Hybrid Tool Planning: Try LLM Tool Intent Planner first,
-        # fallback to deterministic resolver
-        tool_intent: ToolInvocationRequest | None = None
-        if self.tool_planner is not None:
-            tool_intent = await self.tool_planner.plan_tool_intent(text)
+        if timer is not None:
+            timer.start_stage(STAGE_BERU_ANALYSIS)
 
+        # --- Phase 1: Deterministic resolver (zero latency, always runs first) ---
+        # detect_tool_intent() is a pure-Python prefix/phrase matcher with O(n) cost
+        # measured in microseconds. When it returns a match it is HIGH-CONFIDENCE and
+        # the LLM planner adds NO additional value — skip it unconditionally.
+        if timer is not None:
+            timer.start_stage(STAGE_TOOL_RESOLVER)
+        tool_intent: ToolInvocationRequest | None = detect_tool_intent(text)
+        if timer is not None:
+            timer.end_stage(STAGE_TOOL_RESOLVER)
+
+        # --- Phase 2: LLM Tool Intent Planner (only for ambiguous requests) ---
+        # Invoked ONLY when:
+        #   a) detect_tool_intent() found nothing (not an obvious deterministic pattern), AND
+        #   b) may_require_tool() signals keyword/phrase tool-potential (avoids invoking
+        #      the planner on plain conversation like "HI" or "Write a poem").
         if tool_intent is None:
-            tool_intent = detect_tool_intent(text)
+            if timer is not None:
+                timer.start_stage(STAGE_TOOL_SCREENING)
+            needs_planner = self.tool_planner is not None and may_require_tool(text)
+            if timer is not None:
+                timer.end_stage(STAGE_TOOL_SCREENING)
+
+            if needs_planner:
+                if timer is not None:
+                    timer.start_stage(STAGE_TOOL_PLANNER)
+                tool_intent = await self.tool_planner.plan_tool_intent(text)  # type: ignore[union-attr]
+                if timer is not None:
+                    timer.end_stage(STAGE_TOOL_PLANNER)
 
         if tool_intent is not None:
             logger.info(
@@ -145,7 +179,7 @@ class BeruOrchestrator:
                 )
             ]
 
-            # Combined Intent Orchestration: If request asks to SEND AND READ/ANALYZE
+            # Combined Intent Orchestration: Handle file_search, file_send, file_read chaining
             lower_text = text.lower()
             send_kw = ("send", "attach", "give me", "upload", "share")
             read_kw = (
@@ -154,7 +188,31 @@ class BeruOrchestrator:
             has_send = any(k in lower_text for k in send_kw)
             has_read = any(k in lower_text for k in read_kw)
 
-            if has_send and has_read:
+            if tool_intent.tool_name == "file_search":
+                read_intent = ToolInvocationRequest(
+                    tool_name="file_read",
+                    parameters=tool_intent.parameters,
+                )
+                send_intent = ToolInvocationRequest(
+                    tool_name="file_send",
+                    parameters=tool_intent.parameters,
+                )
+                if has_send and has_read:
+                    steps.append(
+                        PlanStep(step_type=StepType.TOOL_INVOCATION, tool_intent=read_intent)
+                    )
+                    steps.append(
+                        PlanStep(step_type=StepType.TOOL_INVOCATION, tool_intent=send_intent)
+                    )
+                elif has_read:
+                    steps.append(
+                        PlanStep(step_type=StepType.TOOL_INVOCATION, tool_intent=read_intent)
+                    )
+                elif has_send:
+                    steps.append(
+                        PlanStep(step_type=StepType.TOOL_INVOCATION, tool_intent=send_intent)
+                    )
+            elif has_send and has_read:
                 # If primary tool was file_send, add file_read step
                 if tool_intent.tool_name == "file_send":
                     read_intent = ToolInvocationRequest(
@@ -184,6 +242,8 @@ class BeruOrchestrator:
             )
             steps.append(model_step)
 
+            if timer is not None:
+                timer.end_stage(STAGE_BERU_ANALYSIS)
             return ExecutionPlan(
                 task_id=request.task_id,
                 correlation_id=request.correlation_id,
@@ -226,6 +286,8 @@ class BeruOrchestrator:
         )
 
         t_beru_ms = (time.monotonic() - t0) * 1000.0
+        if timer is not None:
+            timer.end_stage(STAGE_BERU_ANALYSIS)
         logger.info(
             "[PROFILE] BERU planning end",
             task_id=str(request.task_id),

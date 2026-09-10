@@ -1,5 +1,6 @@
 """BERU Tool Intent Planner — LLM-assisted tool intent resolution with strict validation."""
 
+import asyncio
 import json
 from typing import TYPE_CHECKING, Any, cast
 
@@ -15,6 +16,11 @@ if TYPE_CHECKING:
     from ahjin.tools.registry import ToolRegistry
 
 logger = structlog.get_logger()
+
+# Default bounded timeout in seconds for intent planning calls.
+# Prevents intent planning from stalling execution on slow model responses.
+DEFAULT_PLANNER_TIMEOUT_SECONDS: float = 7.0
+
 
 _PLANNER_SYSTEM_PROMPT = """You are the Tool Intent Planner for AHJIN 2.0.
 Your sole job is to analyze the user's input and decide if a registered tool should be called.
@@ -104,9 +110,11 @@ class ToolIntentPlanner:
         self,
         gateway: "ProviderGateway | None" = None,
         tool_registry: "ToolRegistry | None" = None,
+        planner_timeout: float = DEFAULT_PLANNER_TIMEOUT_SECONDS,
     ) -> None:
         self.gateway = gateway
         self.tool_registry = tool_registry
+        self.planner_timeout = planner_timeout
 
     async def plan_tool_intent(self, text: str) -> ToolInvocationRequest | None:
         """Attempt to plan a structured tool invocation from natural language text.
@@ -124,14 +132,17 @@ class ToolIntentPlanner:
         )
 
         try:
-            # Use FAST tier model for planning
-            result = await self.gateway.invoke(
-                prompt=prompt,
-                requirements=CapabilityRequirements(
-                    requires_reasoning=False,
-                    requires_code=False,
-                    requires_vision=False,
+            # Use FAST tier model for planning with a short, bounded timeout
+            result = await asyncio.wait_for(
+                self.gateway.invoke(
+                    prompt=prompt,
+                    requirements=CapabilityRequirements(
+                        requires_reasoning=False,
+                        requires_code=False,
+                        requires_vision=False,
+                    ),
                 ),
+                timeout=self.planner_timeout,
             )
             raw_content = result.response.content.strip()
             # Clean possible markdown code fences if model included them

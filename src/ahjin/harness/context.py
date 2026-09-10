@@ -36,6 +36,20 @@ class ContextAssembler:
     ) -> ContextualizedPrompt:
         user_instruction = intent.instruction
         if prior_results:
+            # Check if a subsequent file_read step succeeded with content
+            has_successful_file_read = any(
+                (
+                    getattr(r, "tool_name", None) == "file_read"
+                    or (
+                        r.output_text is not None
+                        and ("--- Content of " in r.output_text or "--- Page " in r.output_text)
+                    )
+                )
+                and r.success
+                and bool(r.output_text)
+                for r in prior_results
+            )
+
             result_blocks: list[str] = []
             for res in prior_results:
                 output_content = (
@@ -43,6 +57,29 @@ class ContextAssembler:
                     if res.output_text is not None
                     else (str(res.error) if res.error else "No output")
                 )
+
+                # Objective C: Intermediate file-search context reduction
+                # When file_read has already successfully retrieved the actual document content,
+                # prune the raw multi-record search dump (which can contain 50+ file paths)
+                # from the final model context to avoid bloating prompt and reasoning time.
+                is_file_search = (
+                    getattr(res, "tool_name", None) == "file_search"
+                    or (
+                        res.output_text is not None
+                        and "match(es) for query '" in res.output_text
+                    )
+                )
+                if has_successful_file_read and is_file_search and res.success:
+                    first_line = (
+                        output_content.splitlines()[0]
+                        if output_content
+                        else "File search completed."
+                    )
+                    output_content = (
+                        f"{first_line}\n"
+                        "Candidate document identified and read in subsequent step."
+                    )
+
                 success_str = "true" if res.success else "false"
                 block = (
                     f"[TOOL RESULTS]\n"

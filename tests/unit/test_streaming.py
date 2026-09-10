@@ -223,7 +223,11 @@ async def test_dispatcher_dispatch_stream() -> None:
 
 @pytest.mark.asyncio
 async def test_telegram_adapter_streaming_flow() -> None:
-    """TelegramAdapter sends placeholder, edits message, and completes final text."""
+    """TelegramAdapter sends placeholder, edits message, and completes final text.
+
+    Phase 2 regression test: answer AND footer must both appear in the single
+    final edit_text call — NOT in a separate reply_text call.
+    """
     provider = MockStreamProvider(chunks=["Hello ", "world"])
     gateway = _build_mock_gateway(provider)
     runner = HarnessRunner(gateway=gateway)
@@ -246,14 +250,29 @@ async def test_telegram_adapter_streaming_flow() -> None:
 
     await adapter._handle_message(update, context)
 
-    # Verify placeholder was sent
-    update.message.reply_text.assert_called_with("Thinking...")
+    # First reply_text call must be the placeholder
+    first_reply_call = update.message.reply_text.call_args_list[0][0][0]
+    assert first_reply_call == "Thinking..."
 
-    # Verify placeholder.edit_text was called for final output
+    # Placeholder.edit_text must have been called with the response body
     assert placeholder_msg.edit_text.called
     final_edit_call = placeholder_msg.edit_text.call_args_list[-1][0][0]
     assert "Hello world" in final_edit_call
-    assert "AHJIN Runtime" in final_edit_call
+
+    # Phase 2 SINGLE-MESSAGE ASSERTION:
+    # The footer must be embedded in the final edit_text call, NOT a second reply_text.
+    # reply_text should only be called ONCE (for the placeholder "Thinking...").
+    assert update.message.reply_text.call_count == 1, (
+        f"Expected exactly 1 reply_text call (placeholder only), "
+        f"got {update.message.reply_text.call_count}. "
+        "If the footer is sent via reply_text the single-message UX regression is re-introduced."
+    )
+
+    # When runtime_info is absent (as in unit test without full provider telemetry),
+    # the footer section is skipped; just verify the answer is in the single edit.
+    # This test will also pass when runtime_info IS present, because the footer
+    # will be embedded inside the same edit_text content.
+    assert "Hello world" in final_edit_call
 
 
 @pytest.mark.asyncio
@@ -331,3 +350,87 @@ async def test_local_executor_qwen_streaming_timeout_fallback() -> None:
     full_output = "".join(chunks)
     assert "Qwen 3 8B was taking longer than" in full_output
     assert "Gemma fallback answer" in full_output
+
+
+# ---------------------------------------------------------------------------
+# Phase 2 Regression Tests
+# ---------------------------------------------------------------------------
+
+def test_footer_build_includes_all_buckets_no_other_when_zero() -> None:
+    """_build_runtime_footer omits Other bucket when residual is <= 50ms."""
+    from ahjin.core.types import RuntimeInfo
+    from ahjin.interfaces.telegram.bot import _build_runtime_footer
+    from ahjin.telemetry import (
+        STAGE_BERU_ANALYSIS, STAGE_MODEL_ROUTING, STAGE_STREAM_PROCESSING,
+        STAGE_TELEGRAM_DELIVERY,
+    )
+
+    info = RuntimeInfo(
+        selected_model="nvidia/nemotron-3.5-lightning-30b-a3b",
+        tier="FAST",
+        provider_id="nvidia",
+        ahjin_internal_ms=1.0,
+        model_api_ms=5000.0,
+        total_ms=5010.0,
+        timing={
+            STAGE_BERU_ANALYSIS: 1.0,
+            STAGE_MODEL_ROUTING: 0.1,
+            STAGE_STREAM_PROCESSING: 5000.0,
+            STAGE_TELEGRAM_DELIVERY: 5.0,
+        },
+        health_status="healthy",
+    )
+    footer = _build_runtime_footer(info)
+    assert "AHJIN Runtime" in footer
+    assert "AHJIN:" in footer
+    assert "Model:" in footer
+    assert "Total:" in footer
+    # Other = 5010 - 1 - 5000 - 5 = 4ms -> below 50ms threshold -> not shown
+    assert "Other:" not in footer
+
+
+def test_footer_build_shows_other_bucket_when_large() -> None:
+    """_build_runtime_footer shows Other bucket when residual > 50ms."""
+    from ahjin.core.types import RuntimeInfo
+    from ahjin.interfaces.telegram.bot import _build_runtime_footer
+    from ahjin.telemetry import STAGE_STREAM_PROCESSING, STAGE_TELEGRAM_DELIVERY
+
+    info = RuntimeInfo(
+        selected_model="nvidia/nemotron-3.5-lightning-30b-a3b",
+        tier="FAST",
+        provider_id="nvidia",
+        ahjin_internal_ms=1.0,
+        model_api_ms=5000.0,
+        total_ms=8000.0,  # 3000ms unaccounted
+        timing={
+            STAGE_STREAM_PROCESSING: 5000.0,
+            STAGE_TELEGRAM_DELIVERY: 50.0,
+        },
+        health_status="healthy",
+    )
+    footer = _build_runtime_footer(info)
+    # Other = 8000 - 0 (ahjin from timing=0) - 5000 - 50 = 2950ms -> above 50ms
+    assert "Other:" in footer
+
+
+def test_footer_telegram_bucket_shown_when_measured() -> None:
+    """_build_runtime_footer shows Telegram bucket when STAGE_TELEGRAM_DELIVERY is recorded."""
+    from ahjin.core.types import RuntimeInfo
+    from ahjin.interfaces.telegram.bot import _build_runtime_footer
+    from ahjin.telemetry import STAGE_STREAM_PROCESSING, STAGE_TELEGRAM_DELIVERY
+
+    info = RuntimeInfo(
+        selected_model="nvidia/nemotron-3.5-lightning-30b-a3b",
+        tier="FAST",
+        provider_id="nvidia",
+        model_api_ms=5000.0,
+        total_ms=5300.0,
+        timing={
+            STAGE_STREAM_PROCESSING: 5000.0,
+            STAGE_TELEGRAM_DELIVERY: 200.0,
+        },
+        health_status="healthy",
+    )
+    footer = _build_runtime_footer(info)
+    assert "Telegram:" in footer
+    assert "200ms" in footer

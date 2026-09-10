@@ -1,5 +1,6 @@
 """FileSendTool — Prepare safe filesystem files for interface chat attachment delivery."""
 
+import os
 import time
 from pathlib import Path
 from typing import Any, cast
@@ -10,6 +11,17 @@ from ahjin.tools.base import BaseTool, ToolInvocationRequest, ToolInvocationResu
 
 _MAX_ATTACHMENT_SIZE_BYTES = 50 * 1024 * 1024  # 50 MB limit
 _MAX_BATCH_ATTACHMENTS = 5
+_EXCLUDED_DIRS: frozenset[str] = frozenset({
+    ".git",
+    ".venv",
+    "venv",
+    "__pycache__",
+    "node_modules",
+    ".idea",
+    ".vscode",
+    "build",
+    "dist",
+})
 
 
 class FileSendTool(BaseTool):
@@ -30,7 +42,9 @@ class FileSendTool(BaseTool):
 
     async def execute(self, request: ToolInvocationRequest) -> ToolInvocationResult:
         t0 = time.monotonic()
-        target_path_str = str(request.parameters.get("path", "")).strip()
+        path_param = request.parameters.get("path")
+        query_param = request.parameters.get("query")
+        target_path_str = str(path_param or query_param or "").strip()
 
         if not target_path_str:
             latency_ms = (time.monotonic() - t0) * 1000.0
@@ -63,6 +77,8 @@ class FileSendTool(BaseTool):
                         item_str = f"{item}".lower()
                         target_exts.add(item_str if item_str.startswith(".") else f".{item_str}")
 
+                query_filter = str(request.parameters.get("query", "")).strip().lower()
+
                 for child in resolved_path.rglob("*"):
                     if (
                         child.is_file()
@@ -71,10 +87,18 @@ class FileSendTool(BaseTool):
                     ):
                         if target_exts and child.suffix.lower() not in target_exts:
                             continue
+                        skip_roots = ("pc", "downloads", "desktop", "documents", ".")
+                        if query_filter and query_filter not in skip_roots:
+                            if (
+                                query_filter not in child.name.lower()
+                                and query_filter not in child.stem.lower()
+                            ):
+                                continue
                         candidate_files.append(child)
                         if len(candidate_files) >= _MAX_BATCH_ATTACHMENTS:
                             break
-        else:
+
+        if not candidate_files:
             # 2. Try search_roots for keyword / shortcut / relative subpath discovery
             is_roots_safe, search_roots, _ = self.path_policy.get_search_roots(
                 target_path_str
@@ -85,22 +109,26 @@ class FileSendTool(BaseTool):
                     if s_root.is_file() and not self.path_policy.is_sensitive_file(s_root):
                         candidate_files.append(s_root)
                     elif s_root.is_dir():
-                        for child in s_root.rglob("*"):
-                            if (
-                                child.is_file()
-                                and not self.path_policy.is_sensitive_file(child)
-                                and not self.path_policy.is_system_blocked(child)
-                            ):
-                                skip_terms = ("pc", "downloads", "desktop", "documents")
-                                if query_term and query_term not in skip_terms:
-                                    if (
-                                        query_term not in child.name.lower()
-                                        and query_term not in child.as_posix().lower()
-                                    ):
-                                        continue
-                                candidate_files.append(child)
-                                if len(candidate_files) >= _MAX_BATCH_ATTACHMENTS:
-                                    break
+                        for root_dir, dirs, files in os.walk(s_root):
+                            dirs[:] = [d for d in dirs if d.lower() not in _EXCLUDED_DIRS]
+                            for fname in files:
+                                child = Path(root_dir) / fname
+                                if (
+                                    not self.path_policy.is_sensitive_file(child)
+                                    and not self.path_policy.is_system_blocked(child)
+                                ):
+                                    skip_terms = ("pc", "downloads", "desktop", "documents", ".")
+                                    if query_term and query_term not in skip_terms:
+                                        if (
+                                            query_term not in child.name.lower()
+                                            and query_term not in child.stem.lower()
+                                        ):
+                                            continue
+                                    candidate_files.append(child)
+                                    if len(candidate_files) >= _MAX_BATCH_ATTACHMENTS:
+                                        break
+                            if len(candidate_files) >= _MAX_BATCH_ATTACHMENTS:
+                                break
                         if candidate_files:
                             break
 

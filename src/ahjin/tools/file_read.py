@@ -1,5 +1,4 @@
-"""FileReadTool — Safely read text files, PDF documents, and ZIP archives."""
-
+import os
 import time
 import zipfile
 from pathlib import Path
@@ -13,6 +12,17 @@ from ahjin.tools.base import BaseTool, ToolInvocationRequest, ToolInvocationResu
 
 _MAX_FILE_SIZE_BYTES = 10 * 1024 * 1024  # 10 MB limit for text/PDF files
 _MAX_ZIP_ENTRIES = 500
+_EXCLUDED_DIRS: frozenset[str] = frozenset({
+    ".git",
+    ".venv",
+    "venv",
+    "__pycache__",
+    "node_modules",
+    ".idea",
+    ".vscode",
+    "build",
+    "dist",
+})
 
 
 class FileReadTool(BaseTool):
@@ -34,6 +44,11 @@ class FileReadTool(BaseTool):
     async def execute(self, request: ToolInvocationRequest) -> ToolInvocationResult:
         t0 = time.monotonic()
         path_str = str(request.parameters.get("path", "")).strip()
+        query_param = request.parameters.get("query")
+        query: str | None = str(query_param).strip() if query_param else None
+
+        if not path_str and query:
+            path_str = query
 
         if not path_str:
             latency_ms = (time.monotonic() - t0) * 1000.0
@@ -50,6 +65,68 @@ class FileReadTool(BaseTool):
             )
 
         is_safe, resolved_path, error_reason = self.path_policy.validate_safe_path(path_str)
+
+        # If path is a directory and query is provided, locate matching file inside directory
+        if (
+            is_safe
+            and resolved_path is not None
+            and resolved_path.exists()
+            and resolved_path.is_dir()
+        ):
+            if query:
+                target_q = query.lower()
+                matched_child: Path | None = None
+                for child in resolved_path.rglob("*"):
+                    if (
+                        child.is_file()
+                        and not self.path_policy.is_sensitive_file(child)
+                        and not self.path_policy.is_system_blocked(child)
+                    ):
+                        if target_q in child.name.lower() or target_q in child.stem.lower():
+                            matched_child = child
+                            break
+                if matched_child is not None:
+                    resolved_path = matched_child
+
+        # If path does not exist or is a directory with no match yet, try search_roots
+        if (
+            (
+                not is_safe
+                or resolved_path is None
+                or not resolved_path.exists()
+                or resolved_path.is_dir()
+            )
+            and (query or path_str)
+        ):
+            is_roots_safe, search_roots, _ = self.path_policy.get_search_roots(path_str)
+            if is_roots_safe and search_roots:
+                target_term = (query or path_str).lower()
+                matched_child = None
+                for s_root in search_roots:
+                    if s_root.is_dir():
+                        for root_dir, dirs, files in os.walk(s_root):
+                            dirs[:] = [d for d in dirs if d.lower() not in _EXCLUDED_DIRS]
+                            for fname in files:
+                                child = Path(root_dir) / fname
+                                if (
+                                    not self.path_policy.is_sensitive_file(child)
+                                    and not self.path_policy.is_system_blocked(child)
+                                ):
+                                    if (
+                                        target_term in child.name.lower()
+                                        or target_term in child.stem.lower()
+                                    ):
+                                        matched_child = child
+                                        break
+                            if matched_child is not None:
+                                break
+                    if matched_child is not None:
+                        break
+                if matched_child is not None:
+                    resolved_path = matched_child
+                    is_safe = True
+                    error_reason = None
+
         if not is_safe or resolved_path is None:
             latency_ms = (time.monotonic() - t0) * 1000.0
             return ToolInvocationResult(
