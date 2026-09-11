@@ -126,7 +126,10 @@ class BeruOrchestrator:
         # fallback to deterministic resolver
         tool_intent: ToolInvocationRequest | None = None
         if self.tool_planner is not None:
-            tool_intent = await self.tool_planner.plan_tool_intent(text)
+            tool_intent = await self.tool_planner.plan_tool_intent(
+                text, 
+                conversation_history=request.context.conversation_history
+            )
 
         if tool_intent is None:
             tool_intent = detect_tool_intent(text)

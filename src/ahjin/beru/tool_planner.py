@@ -13,6 +13,7 @@ from ahjin.tools.system_info import SAFE_FIELDS_WHITELIST
 if TYPE_CHECKING:
     from ahjin.harness.gateway import ProviderGateway
     from ahjin.tools.registry import ToolRegistry
+    from ahjin.core.types import ConversationTurn
 
 logger = structlog.get_logger()
 
@@ -64,14 +65,25 @@ AVAILABLE TOOLS CATALOG:
      "direction": "down" or "up" (for "scroll").
      "key": key name e.g. "Enter" (for "press").
 
+7. image_edit
+   Purpose: Edit or compress an image file. MUST have the exact file path from a previous file_search.
+   Parameters:
+     "path": exact path to the candidate image file (e.g., "downloads/photo.jpg").
+     "operation": "compress" or "enlarge" or "resize".
+     "target_kb": optional integer size limit in KB.
+     "target_dimensions": optional string "WIDTHxHEIGHT" (e.g., "2000x2000").
+     "scale": optional string scale (e.g., "2x").
+
 INSTRUCTIONS:
 - You MUST invoke a tool when asked to send/read files, search the web, OR control a browser.
+- Context Awareness: If conversation history is provided, use it to resolve intent. E.g. if the user says "yes do it" right after you found an image to compress, output the "image_edit" tool with the image path.
 - Intent Mapping:
   - User asks to OPEN BROWSER, GO TO URL, CLICK, TYPE, SCROLL, TAKE SCREENSHOT -> output "browser".
   - User asks to SEND, ATTACH, GIVE, or RETURN a file -> output "file_send".
   - User asks to READ, EXTRACT, SUMMARIZE, or ASK ABOUT content -> output "file_read".
   - User asks to FIND, LOCATE, or SEARCH local files -> output "file_search".
   - User asks to SEARCH THE WEB or FIND LATEST/CURRENT info -> output "web_search".
+  - User asks to COMPRESS, RESIZE, or ENLARGE an image -> output "image_edit".
 - Path Extraction Rules:
   - If user mentions nested folders (e.g. "inside Downloads Archived"), combine them into
     "path": "downloads/archived".
@@ -88,6 +100,8 @@ INSTRUCTIONS:
   {"tool_name": "file_search", "parameters": {"query": "resume", "path": "downloads/archived"}}
   or
   {"tool_name": "system_info", "parameters": {"fields": ["os"]}}
+  or
+  {"tool_name": "image_edit", "parameters": {"path": "downloads/photo.jpg", "operation": "compress", "target_kb": 200}}
 - Do NOT output explanations or markdown formatting outside the JSON object.
 """
 
@@ -108,7 +122,7 @@ class ToolIntentPlanner:
         self.gateway = gateway
         self.tool_registry = tool_registry
 
-    async def plan_tool_intent(self, text: str) -> ToolInvocationRequest | None:
+    async def plan_tool_intent(self, text: str, conversation_history: list["ConversationTurn"] | None = None) -> ToolInvocationRequest | None:
         """Attempt to plan a structured tool invocation from natural language text.
 
         Returns:
@@ -121,6 +135,7 @@ class ToolIntentPlanner:
         prompt = ContextualizedPrompt(
             system_instruction=_PLANNER_SYSTEM_PROMPT,
             user_instruction=text,
+            conversation_history=conversation_history or [],
         )
 
         try:
@@ -228,6 +243,18 @@ class ToolIntentPlanner:
                         parameters["action"] = "observe"
                 else:
                     parameters["action"] = raw_action.strip().lower()
+
+            elif tool_name == "image_edit":
+                raw_path: Any = parameters.get("path")
+                if not isinstance(raw_path, str) or not raw_path.strip():
+                    logger.warning("ToolIntentPlanner: Invalid or missing path for image_edit")
+                    return None
+                parameters["path"] = raw_path.strip()
+                raw_op: Any = parameters.get("operation")
+                if not isinstance(raw_op, str) or raw_op.strip().lower() not in ("compress", "enlarge", "resize"):
+                    logger.warning("ToolIntentPlanner: Invalid or missing operation for image_edit")
+                    return None
+                parameters["operation"] = raw_op.strip().lower()
 
             logger.info(
                 "ToolIntentPlanner: Planned structured tool intent",

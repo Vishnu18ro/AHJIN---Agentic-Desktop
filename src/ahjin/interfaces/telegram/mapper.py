@@ -14,15 +14,25 @@ class TelegramMapper:
     """Translates Telegram data structures to canonical AHJIN domain types."""
 
     @staticmethod
-    def to_task_request(chat_id: int, message_text: str) -> TaskRequest:
+    def to_task_request(chat_id: int, message_text: str, conversation_history: list[dict[str, str]] | None = None) -> TaskRequest:
         """Map Telegram message input to canonical TaskRequest."""
+        from ahjin.core.types import ConversationTurn, Role
         intent = UserIntent(
             primary_text=message_text,
             modality=Modality.TEXT,
         )
+        # Format history into ConversationTurns for TaskContext
+        formatted_history: list[ConversationTurn] = []
+        if conversation_history:
+            for msg in conversation_history:
+                role_str = msg.get("role", "unknown").lower()
+                content = msg.get("content", "")
+                role = Role.USER if role_str == "user" else Role.ASSISTANT if role_str == "assistant" else Role.SYSTEM
+                formatted_history.append(ConversationTurn(role=role, content=content))
+                
         context = TaskContext(
             session_id=f"telegram:{chat_id}",
-            conversation_history=[],
+            conversation_history=formatted_history,
         )
         metadata = RequestMetadata(
             source_interface="telegram",

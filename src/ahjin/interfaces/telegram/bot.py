@@ -6,7 +6,7 @@ from typing import Any
 
 import structlog
 from telegram import Update
-from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandler, filters
+from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes, MessageHandler, filters
 
 from ahjin.core.config import settings
 from ahjin.core.dispatcher import TaskDispatcher
@@ -15,6 +15,7 @@ from ahjin.interfaces.base import BaseInterfaceAdapter
 from ahjin.interfaces.telegram.mapper import TelegramMapper
 from ahjin.models.health import ModelHealthStatus
 from ahjin.models.router import ModelRouter
+from ahjin.agents.file_agent import FileAgent
 
 logger = structlog.get_logger()
 
@@ -150,12 +151,15 @@ class TelegramAdapter(BaseInterfaceAdapter):
         token: str | None = None,
         dispatcher: TaskDispatcher | None = None,
         router: ModelRouter | None = None,
+        file_agent: FileAgent | None = None,
     ) -> None:
         self.token = token or settings.telegram_bot_token
         self.dispatcher = dispatcher or TaskDispatcher()
         self.router = router  # Optional; enables /health and /models commands
+        self.file_agent = file_agent or FileAgent()
         self.app: Application[Any, Any, Any, Any, Any, Any] | None = None
         self._stop_event: asyncio.Event = asyncio.Event()
+        self.chat_history: dict[int, list[dict[str, str]]] = {}
 
     @property
     def interface_id(self) -> str:
@@ -187,16 +191,32 @@ class TelegramAdapter(BaseInterfaceAdapter):
         if not update.message or not update.message.text:
             return
 
+        # 0. Intercept with Conversational File Agent (multi-turn file search/disambiguation)
+        if self.file_agent is not None:
+            handled = await self.file_agent.handle_message(update, context)
+            if handled:
+                return
+
         t0_recv = time.monotonic()
         chat_id = update.message.chat_id
         text = update.message.text
 
         logger.info("[PROFILE] Telegram update received", chat_id=chat_id, text_length=len(text))
 
-        # 1. Map Telegram input to TaskRequest
+        # 1. Manage chat history
+        if chat_id not in self.chat_history:
+            self.chat_history[chat_id] = []
+        
+        # Keep last 10 messages
+        history = self.chat_history[chat_id][-10:]
+        
+        # Map Telegram input to TaskRequest with history
         t0_map = time.monotonic()
-        request = TelegramMapper.to_task_request(chat_id, text)
+        request = TelegramMapper.to_task_request(chat_id, text, history)
         t_map_ms = (time.monotonic() - t0_map) * 1000.0
+
+        # Add current user message to history
+        self.chat_history[chat_id].append({"role": "user", "content": text})
 
         # 2. Send initial placeholder message
         placeholder_msg = await update.message.reply_text("Thinking...")
@@ -278,6 +298,9 @@ class TelegramAdapter(BaseInterfaceAdapter):
         full_text = response_text + footer
         chunks = _chunk_message(full_text)
 
+        # Add assistant response to history (excluding footer to save tokens)
+        self.chat_history[chat_id].append({"role": "assistant", "content": response_text})
+
         # Final edit & chunk delivery
         t0_reply = time.monotonic()
         try:
@@ -346,6 +369,11 @@ class TelegramAdapter(BaseInterfaceAdapter):
             was_rerouted=was_rerouted,
         )
 
+    async def _handle_callback(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Handle inline button callback queries via FileAgent."""
+        if self.file_agent is not None:
+            await self.file_agent.handle_callback(update, context)
+
     async def start(self) -> None:
         """Start Telegram bot application and block until stopped."""
         if not self.token:
@@ -356,6 +384,7 @@ class TelegramAdapter(BaseInterfaceAdapter):
         self.app.add_handler(CommandHandler("start", self._start_command))
         self.app.add_handler(CommandHandler("health", self._health_command))
         self.app.add_handler(CommandHandler("models", self._models_command))
+        self.app.add_handler(CallbackQueryHandler(self._handle_callback))
         self.app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, self._handle_message))
 
         logger.info("Starting Telegram bot polling...")
