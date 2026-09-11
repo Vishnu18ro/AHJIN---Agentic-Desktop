@@ -175,6 +175,21 @@ class BeruOrchestrator:
         if timer is not None:
             timer.end_stage(STAGE_TOOL_RESOLVER)
 
+        planner_res: PlannerResult | None = None
+
+        def _make_plan(plan_steps: list[PlanStep]) -> ExecutionPlan:
+            pr = planner_res
+            return ExecutionPlan(
+                task_id=request.task_id,
+                correlation_id=request.correlation_id,
+                steps=plan_steps,
+                planner_route_history=list(pr.attempted_models) if pr is not None else [],
+                planner_was_rerouted=pr.was_rerouted if pr is not None else False,
+                planner_failed_model=pr.first_failed_model if pr is not None else None,
+                planner_failure_reason=pr.first_failure_reason if pr is not None else None,
+                planner_selected_model=pr.selected_model if pr is not None else None,
+            )
+
         # --- Phase 2: LLM Tool Intent Planner (only for ambiguous requests) ---
         # Invoked ONLY when:
         #   a) detect_tool_intent() found nothing (not an obvious deterministic pattern), AND
@@ -190,7 +205,7 @@ class BeruOrchestrator:
             if needs_planner:
                 if timer is not None:
                     timer.start_stage(STAGE_TOOL_PLANNER)
-                planner_res: PlannerResult = await self.tool_planner.plan_tool_intent(text)  # type: ignore[union-attr]
+                planner_res = await self.tool_planner.plan_tool_intent(text)  # type: ignore[union-attr]
                 if timer is not None:
                     timer.end_stage(STAGE_TOOL_PLANNER)
 
@@ -207,11 +222,7 @@ class BeruOrchestrator:
                     )
                     if timer is not None:
                         timer.end_stage(STAGE_BERU_ANALYSIS)
-                    return ExecutionPlan(
-                        task_id=request.task_id,
-                        correlation_id=request.correlation_id,
-                        steps=[fail_step],
-                    )
+                    return _make_plan([fail_step])
 
         if tool_intent is not None:
             logger.info(
@@ -254,11 +265,7 @@ class BeruOrchestrator:
                         )
                         if timer is not None:
                             timer.end_stage(STAGE_BERU_ANALYSIS)
-                        return ExecutionPlan(
-                            task_id=request.task_id,
-                            correlation_id=request.correlation_id,
-                            steps=[err_step],
-                        )
+                        return _make_plan([err_step])
                     if resolved_file is not None and resolved_file.is_file():
                         is_exact_file = True
                         tool_intent.parameters["path"] = str(resolved_file)
@@ -373,11 +380,7 @@ class BeruOrchestrator:
 
             if timer is not None:
                 timer.end_stage(STAGE_BERU_ANALYSIS)
-            return ExecutionPlan(
-                task_id=request.task_id,
-                correlation_id=request.correlation_id,
-                steps=steps,
-            )
+            return _make_plan(steps)
 
         reqs = self.analyze_task_requirements(text)
 
@@ -391,7 +394,6 @@ class BeruOrchestrator:
         strategy = ExecutionStrategy(
             capability_requirements=reqs,
             preferred_tier=target_tier,
-            max_recovery_attempts=2,
             require_verification=True,
             recovery_policy=RecoveryPolicy.REROUTE,
             quality_preference=quality_preference,
@@ -408,11 +410,7 @@ class BeruOrchestrator:
             model_intent=model_intent,
         )
 
-        plan_res = ExecutionPlan(
-            task_id=request.task_id,
-            correlation_id=request.correlation_id,
-            steps=[step],
-        )
+        plan_res = _make_plan([step])
 
         t_beru_ms = (time.monotonic() - t0) * 1000.0
         if timer is not None:

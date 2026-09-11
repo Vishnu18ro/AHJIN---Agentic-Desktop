@@ -93,17 +93,28 @@ class RuntimeInfo(BaseModel):
     provider_id: str = ""
     # Timing in milliseconds (best-effort; 0.0 means not measured)
     ahjin_internal_ms: float = 0.0    # BERU + routing overhead
-    model_api_ms: float = 0.0         # provider round-trip only
+    provider_api_ms: float = 0.0      # external provider turnaround / TTFT
+    model_api_ms: float = 0.0         # provider round-trip / model generation duration
     total_ms: float = 0.0             # full request time
     # Detailed per-stage breakdown from RequestTimer (optional; empty dict if unavailable)
     timing: dict[str, float] = Field(default_factory=dict)  # pyright: ignore[reportUnknownVariableType]
     # Individual executed tools and their respective durations in ms
     tool_timings: list[tuple[str, float]] = Field(default_factory=list)  # pyright: ignore[reportUnknownVariableType]
     executed_tools: list[str] = Field(default_factory=list)  # pyright: ignore[reportUnknownVariableType]
-    # Rerouting
+    # Whole-request Rerouting
     was_rerouted: bool = False
     failed_model: str | None = None
     failure_reason: str | None = None
+    # Component routing history
+    planner_was_rerouted: bool = False
+    planner_route_history: list[str] = Field(default_factory=list)  # pyright: ignore[reportUnknownVariableType]
+    planner_failed_model: str | None = None
+    planner_failure_reason: str | None = None
+    planner_selected_model: str | None = None
+    harness_was_rerouted: bool = False
+    harness_route_history: list[str] = Field(default_factory=list)  # pyright: ignore[reportUnknownVariableType]
+    harness_failed_model: str | None = None
+    harness_failure_reason: str | None = None
     # Health of selected model at response time
     health_status: str = "UNKNOWN"
 

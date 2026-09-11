@@ -64,17 +64,17 @@ def _setup_production_stack(
 
 @pytest.mark.asyncio
 async def test_simple_task_fast_tier_routing() -> None:
-    """Simple prompt 'Hi' must route to FAST tier (Nemotron Lightning) with Direct path."""
+    """Simple prompt 'Hi' must route to FAST tier (MiniMax M3 primary) with Direct path."""
     catalog = create_default_catalog()
     registry = ProviderRegistry()
 
     class MockFastProvider(BaseModelProvider):
         @property
         def provider_id(self) -> str:
-            return "nvidia"
+            return "openrouter"
 
         def get_default_model_id(self) -> str:
-            return "nvidia/nemotron-3.5-lightning-30b-a3b"
+            return "minimax/minimax-m3"
 
         async def invoke(self, request: ModelInvocationRequest) -> ModelInvocationResponse:
             return ModelInvocationResponse(
@@ -95,11 +95,12 @@ async def test_simple_task_fast_tier_routing() -> None:
     assert res.output_text == "Hello! How can I help you today?"
     assert res.runtime_info is not None
     assert res.runtime_info.tier == "FAST"
-    assert res.runtime_info.selected_model == "nvidia/nemotron-3.5-lightning-30b-a3b"
+    assert res.runtime_info.selected_model == "minimax/minimax-m3"
     assert res.runtime_info.was_rerouted is False
 
     footer = _build_runtime_footer(res.runtime_info)
-    assert "Model: Nemotron Lightning 30B" in footer
+    assert "Model: MiniMax M3" in footer
+    assert "Provider: OpenRouter" in footer
     assert "Route: FAST" in footer
     assert "Path: Direct" in footer
     assert "Health: 🟢 Healthy" in footer
@@ -122,7 +123,7 @@ async def test_reasoning_task_heavy_tier_routing() -> None:
             return "openrouter"
 
         def get_default_model_id(self) -> str:
-            return "minimax/minimax-m3:free"
+            return "minimax/minimax-m3"
 
         async def invoke(self, request: ModelInvocationRequest) -> ModelInvocationResponse:
             return ModelInvocationResponse(
@@ -145,10 +146,11 @@ async def test_reasoning_task_heavy_tier_routing() -> None:
     assert res.success is True
     assert res.runtime_info is not None
     assert res.runtime_info.tier == "HEAVY"
-    assert res.runtime_info.selected_model == "minimax/minimax-m3:free"
+    assert res.runtime_info.selected_model == "minimax/minimax-m3"
 
     footer = _build_runtime_footer(res.runtime_info)
     assert "Model: MiniMax M3" in footer
+    assert "Provider: OpenRouter" in footer
     assert "Route: HEAVY" in footer
 
 
@@ -278,7 +280,7 @@ async def test_same_request_rerouting_observability() -> None:
 
     footer = _build_runtime_footer(res.runtime_info)
     assert "Path: ↪ Rerouted" in footer
-    assert "From: failing-heavy-model" in footer
+    assert "From:" not in footer
     assert "Reason: network error" in footer
 
 
@@ -319,12 +321,12 @@ async def test_request_isolation_excluded_models() -> None:
 
     reqs = CapabilityRequirements()
 
-    # Request 1 excludes lightning
+    # Request 1 excludes minimax
     sel1 = router.select_model(
-        reqs, excluded_model_ids={"nvidia/nemotron-3.5-lightning-30b-a3b"}
+        reqs, excluded_model_ids={"minimax/minimax-m3"}
     )
-    # Request 2 has no exclusions — lightning must remain eligible
+    # Request 2 has no exclusions — minimax must remain eligible
     sel2 = router.select_model(reqs, excluded_model_ids=None)
 
-    assert sel1.model_id != "nvidia/nemotron-3.5-lightning-30b-a3b"
-    assert sel2.model_id == "nvidia/nemotron-3.5-lightning-30b-a3b"
+    assert sel1.model_id != "minimax/minimax-m3"
+    assert sel2.model_id == "minimax/minimax-m3"

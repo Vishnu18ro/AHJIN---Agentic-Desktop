@@ -39,7 +39,7 @@ class ExecutionStrategy(BaseModel):
 
     capability_requirements: CapabilityRequirements = Field(default_factory=CapabilityRequirements)
     preferred_tier: str = "FAST"
-    max_recovery_attempts: int = 2
+    max_recovery_attempts: int | None = None
     require_verification: bool = True
     recovery_policy: RecoveryPolicy = RecoveryPolicy.REROUTE
     quality_preference: str = "balanced"  # "speed", "quality", "balanced"
@@ -73,3 +73,9 @@ class ExecutionPlan(BaseModel):
     correlation_id: UUID
     steps: list[PlanStep]
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    # Planner routing telemetry for whole-request observability
+    planner_route_history: list[str] = Field(default_factory=list)  # pyright: ignore[reportUnknownVariableType]
+    planner_was_rerouted: bool = False
+    planner_failed_model: str | None = None
+    planner_failure_reason: str | None = None
+    planner_selected_model: str | None = None

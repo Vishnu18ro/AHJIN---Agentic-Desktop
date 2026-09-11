@@ -236,10 +236,12 @@ class TestSimplifiedFooterRendering:
         )
         footer = _build_runtime_footer(info)
         assert "Model: Nemotron Lightning 30B" in footer
+        assert "Provider: NVIDIA" in footer
         assert "Route: FAST" in footer
         assert "⏱ Latency" in footer
         assert "├─ AHJIN: 21ms" in footer  # 18 + 2 + 1 = 21ms (excludes telegram_receive)
-        assert "├─ Model: 6840ms" in footer
+        assert "├─ Provider: 800ms" in footer
+        assert "├─ Model: 6040ms" in footer
         assert "└─ Total: 7310ms" in footer
         assert "Tool:" not in footer
         assert "Tools:" not in footer

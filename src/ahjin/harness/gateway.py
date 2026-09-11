@@ -77,29 +77,24 @@ class ProviderGateway:
             requirements, excluded_model_ids=excluded_model_ids
         )
 
-        # Provider lookup: if provider_id is not registered this raises KeyError explicitly.
-        # This surfaces configuration/setup errors rather than silently selecting an
-        # arbitrary default model, which would bypass ModelRouter's authoritative decision.
-        provider: BaseModelProvider = self.registry.get_provider(selection.provider_id)
-
         model_id = selection.model_id
         max_tokens = selection.max_output_tokens
 
-        request = ModelInvocationRequest(
-            prompt=prompt,
-            model_id=model_id,
-            max_tokens=max_tokens,
-        )
-
         logger.info(
             "Invoking provider via gateway",
-            provider_id=provider.provider_id,
-            model_id=request.model_id,
+            provider_id=selection.provider_id,
+            model_id=model_id,
             tier=selection.tier.value,
             router_time_ms=round(selection.selection_time_ms, 3),
         )
 
         try:
+            provider: BaseModelProvider = self.registry.get_provider(selection.provider_id)
+            request = ModelInvocationRequest(
+                prompt=prompt,
+                model_id=model_id,
+                max_tokens=max_tokens,
+            )
             response = await provider.invoke(request)
             self.router.health_tracker.record_success(model_id, response.latency_ms)
             return GatewayInvocationResult(response=response, selection=selection)
@@ -120,25 +115,24 @@ class ProviderGateway:
         selection = self.router.select_model(
             requirements, excluded_model_ids=excluded_model_ids
         )
-        provider: BaseModelProvider = self.registry.get_provider(selection.provider_id)
         model_id = selection.model_id
         max_tokens = selection.max_output_tokens
 
-        request = ModelInvocationRequest(
-            prompt=prompt,
-            model_id=model_id,
-            max_tokens=max_tokens,
-        )
-
         logger.info(
             "Invoking provider stream via gateway",
-            provider_id=provider.provider_id,
-            model_id=request.model_id,
+            provider_id=selection.provider_id,
+            model_id=model_id,
             tier=selection.tier.value,
         )
 
         t0 = time.monotonic()
         try:
+            provider: BaseModelProvider = self.registry.get_provider(selection.provider_id)
+            request = ModelInvocationRequest(
+                prompt=prompt,
+                model_id=model_id,
+                max_tokens=max_tokens,
+            )
             async for chunk in provider.invoke_stream(request):
                 yield chunk, selection
             latency_ms = (time.monotonic() - t0) * 1000.0

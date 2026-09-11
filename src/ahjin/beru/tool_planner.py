@@ -2,7 +2,7 @@
 
 import asyncio
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import Enum
 from typing import TYPE_CHECKING, Any, cast
 
@@ -52,6 +52,11 @@ class PlannerResult:
     status: PlannerStatus
     tool_intent: ToolInvocationRequest | None = None
     failure_reason: str | None = None
+    attempted_models: list[str] = field(default_factory=list)  # pyright: ignore[reportUnknownVariableType]
+    selected_model: str | None = None
+    first_failed_model: str | None = None
+    first_failure_reason: str | None = None
+    was_rerouted: bool = False
 
     # Backward-compatible convenience accessors
     @property
@@ -338,6 +343,23 @@ class ToolIntentPlanner:
             self.max_attempts if self.max_attempts is not None else _DEFENSIVE_MAX_ATTEMPTS
         )
 
+        attempted_models: list[str] = []
+        first_failed_model: str | None = None
+        first_failure_reason: str | None = None
+
+        def _record_failure(
+            model: str | None, reason: str, is_provider_error: bool = False
+        ) -> None:
+            nonlocal first_failed_model, first_failure_reason, last_failure_reason
+            last_failure_reason = f"provider_error: {reason}" if is_provider_error else reason
+            if model:
+                excluded_models.add(str(model))
+                if str(model) not in attempted_models:
+                    attempted_models.append(str(model))
+                if first_failed_model is None:
+                    first_failed_model = str(model)
+                    first_failure_reason = reason
+
         while attempts < max_loop_iterations:
             attempts += 1
 
@@ -348,6 +370,8 @@ class ToolIntentPlanner:
                         requirements, excluded_model_ids=excluded_models
                     )
                     current_model_id = candidate.model_id
+                    if current_model_id not in attempted_models:
+                        attempted_models.append(current_model_id)
                 except CapabilityUnavailableError:
                     if not last_failure_reason or last_failure_reason == "unknown":
                         last_failure_reason = "capability_unavailable"
@@ -368,6 +392,8 @@ class ToolIntentPlanner:
                     timeout=self.planner_timeout,
                 )
                 selected_model_id = result.selection.model_id
+                if selected_model_id not in attempted_models:
+                    attempted_models.append(selected_model_id)
                 raw_content = result.response.content.strip()
                 if not raw_content:
                     logger.warning(
@@ -375,8 +401,7 @@ class ToolIntentPlanner:
                         model_id=selected_model_id,
                         attempt=attempts,
                     )
-                    excluded_models.add(selected_model_id)
-                    last_failure_reason = "empty_response"
+                    _record_failure(selected_model_id, "empty_response")
                     continue
 
                 # Clean possible markdown code fences if model included them
@@ -402,8 +427,7 @@ class ToolIntentPlanner:
                                 model_id=selected_model_id,
                                 attempt=attempts,
                             )
-                            excluded_models.add(selected_model_id)
-                            last_failure_reason = "invalid_json"
+                            _record_failure(selected_model_id, "invalid_json")
                             continue
                     else:
                         logger.warning(
@@ -412,8 +436,7 @@ class ToolIntentPlanner:
                             model_id=selected_model_id,
                             attempt=attempts,
                         )
-                        excluded_models.add(selected_model_id)
-                        last_failure_reason = "invalid_json"
+                        _record_failure(selected_model_id, "invalid_json")
                         continue
 
                 parsed_dict: dict[str, Any] = cast(dict[str, Any], parsed_obj)
@@ -425,8 +448,7 @@ class ToolIntentPlanner:
                         model_id=selected_model_id,
                         attempt=attempts,
                     )
-                    excluded_models.add(selected_model_id)
-                    last_failure_reason = "missing_tool_name"
+                    _record_failure(selected_model_id, "missing_tool_name")
                     continue
 
                 # Explicit NO_TOOL state
@@ -436,7 +458,14 @@ class ToolIntentPlanner:
                         intent="conversational/reasoning",
                         model_id=selected_model_id,
                     )
-                    return PlannerResult(status=PlannerStatus.NO_TOOL)
+                    return PlannerResult(
+                        status=PlannerStatus.NO_TOOL,
+                        attempted_models=attempted_models,
+                        selected_model=selected_model_id,
+                        first_failed_model=first_failed_model,
+                        first_failure_reason=first_failure_reason,
+                        was_rerouted=(first_failed_model is not None),
+                    )
 
                 tool_name: str = tool_name_val
 
@@ -448,8 +477,7 @@ class ToolIntentPlanner:
                         model_id=selected_model_id,
                         attempt=attempts,
                     )
-                    excluded_models.add(selected_model_id)
-                    last_failure_reason = f"unregistered_tool:{tool_name}"
+                    _record_failure(selected_model_id, f"unregistered_tool:{tool_name}")
                     continue
 
                 raw_params: Any = parsed_dict.get("parameters")
@@ -478,8 +506,7 @@ class ToolIntentPlanner:
                             model_id=selected_model_id,
                             attempt=attempts,
                         )
-                        excluded_models.add(selected_model_id)
-                        last_failure_reason = "invalid_system_info_fields"
+                        _record_failure(selected_model_id, "invalid_system_info_fields")
                         continue
                     parameters["fields"] = valid_fields
 
@@ -491,8 +518,7 @@ class ToolIntentPlanner:
                             model_id=selected_model_id,
                             attempt=attempts,
                         )
-                        excluded_models.add(selected_model_id)
-                        last_failure_reason = "invalid_file_search_query"
+                        _record_failure(selected_model_id, "invalid_file_search_query")
                         continue
                     parameters["query"] = raw_query.strip()
                     raw_path: Any = parameters.get("path")
@@ -511,8 +537,7 @@ class ToolIntentPlanner:
                                 model_id=selected_model_id,
                                 attempt=attempts,
                             )
-                            excluded_models.add(selected_model_id)
-                            last_failure_reason = "invalid_file_read_path"
+                            _record_failure(selected_model_id, "invalid_file_read_path")
                             continue
                     parameters["path"] = str(raw_path).strip()
                     if raw_query and isinstance(raw_query, str):
@@ -530,8 +555,7 @@ class ToolIntentPlanner:
                                 model_id=selected_model_id,
                                 attempt=attempts,
                             )
-                            excluded_models.add(selected_model_id)
-                            last_failure_reason = "invalid_file_send_path"
+                            _record_failure(selected_model_id, "invalid_file_send_path")
                             continue
                     parameters["path"] = str(raw_path).strip()
                     if raw_query and isinstance(raw_query, str):
@@ -545,8 +569,7 @@ class ToolIntentPlanner:
                             model_id=selected_model_id,
                             attempt=attempts,
                         )
-                        excluded_models.add(selected_model_id)
-                        last_failure_reason = "invalid_web_search_query"
+                        _record_failure(selected_model_id, "invalid_web_search_query")
                         continue
                     parameters["query"] = raw_query.strip()
                     raw_recency: Any = parameters.get("recency_days")
@@ -587,12 +610,16 @@ class ToolIntentPlanner:
                 return PlannerResult(
                     status=PlannerStatus.TOOL_SELECTED,
                     tool_intent=req,
+                    attempted_models=attempted_models,
+                    selected_model=selected_model_id,
+                    first_failed_model=first_failed_model,
+                    first_failure_reason=first_failure_reason,
+                    was_rerouted=(first_failed_model is not None),
                 )
 
             except asyncio.TimeoutError:
                 failed_id = current_model_id
-                if failed_id:
-                    excluded_models.add(failed_id)
+                _record_failure(failed_id, "timeout")
                 logger.warning(
                     "ToolIntentPlanner: Intent planning timed out",
                     timeout_seconds=self.planner_timeout,
@@ -600,7 +627,6 @@ class ToolIntentPlanner:
                     attempt=attempts,
                     max_attempts=max_loop_iterations,
                 )
-                last_failure_reason = "timeout"
                 continue
 
             except CapabilityUnavailableError as cap_err:
@@ -615,8 +641,17 @@ class ToolIntentPlanner:
 
             except (httpx.HTTPStatusError, httpx.RequestError) as http_err:
                 failed_id = getattr(http_err, "model_id", current_model_id)
-                if failed_id:
-                    excluded_models.add(str(failed_id))
+                if isinstance(http_err, httpx.HTTPStatusError):
+                    http_reason = f"HTTP {http_err.response.status_code}"
+                elif isinstance(http_err, httpx.TimeoutException):
+                    http_reason = "timeout"
+                else:
+                    http_reason = "network error"
+                _record_failure(
+                    str(failed_id) if failed_id else None,
+                    http_reason,
+                    is_provider_error=True,
+                )
                 logger.warning(
                     "ToolIntentPlanner: Planning provider HTTP/network error",
                     error=str(http_err),
@@ -624,13 +659,15 @@ class ToolIntentPlanner:
                     attempt=attempts,
                     max_attempts=max_loop_iterations,
                 )
-                last_failure_reason = f"provider_error: {http_err}"
                 continue
 
             except Exception as exc:
                 failed_id = getattr(exc, "model_id", current_model_id)
-                if failed_id:
-                    excluded_models.add(str(failed_id))
+                _record_failure(
+                    str(failed_id) if failed_id else None,
+                    "provider error",
+                    is_provider_error=True,
+                )
                 logger.warning(
                     "ToolIntentPlanner: Planning provider unhandled error",
                     error=str(exc),
@@ -638,7 +675,6 @@ class ToolIntentPlanner:
                     attempt=attempts,
                     max_attempts=max_loop_iterations,
                 )
-                last_failure_reason = f"provider_error: {exc}"
                 continue
 
         logger.warning(
@@ -651,5 +687,10 @@ class ToolIntentPlanner:
         return PlannerResult(
             status=PlannerStatus.PLANNER_FAILURE,
             failure_reason=last_failure_reason,
+            attempted_models=attempted_models,
+            selected_model=None,
+            first_failed_model=first_failed_model,
+            first_failure_reason=first_failure_reason,
+            was_rerouted=(first_failed_model is not None),
         )
 

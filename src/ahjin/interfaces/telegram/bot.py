@@ -26,6 +26,7 @@ from ahjin.telemetry import (
     STAGE_TELEGRAM_DELIVERY,
     STAGE_TELEGRAM_PLACEHOLDER,
     STAGE_TELEGRAM_RECEIVE,
+    STAGE_TIME_TO_FIRST_TOKEN,
     STAGE_TOOL_EXECUTION,
     STAGE_TOOL_PLANNER,
 )
@@ -67,13 +68,26 @@ def _chunk_message(text: str, chunk_size: int = TELEGRAM_MAX_MESSAGE_LENGTH) -> 
     return [c for c in chunks if c]
 
 
+def _provider_display_name(provider_id: str) -> str:
+    """Return a clean, human-readable provider name for the footer."""
+    if not provider_id:
+        return "Unknown"
+    prov_map = {
+        "openrouter": "OpenRouter",
+        "nvidia": "NVIDIA",
+        "ollama": "Ollama",
+        "ahjin": "AHJIN",
+    }
+    return prov_map.get(provider_id.lower(), provider_id.title())
+
+
 def _model_short_name(model_id: str) -> str:
     """Return a compact, human-readable model name for the footer."""
     label_map = {
         "minimax/minimax-m3": "MiniMax M3",
         "minimax/minimax-m3:free": "MiniMax M3",
-        "nvidia/nemotron-3.5-lightning:free": "Nemotron Lightning (OpenRouter)",
-        "nvidia/nemotron-3-ultra-550b-a55b:free": "Nemotron Ultra (OpenRouter)",
+        "nvidia/nemotron-3.5-lightning:free": "Nemotron 3.5 Lightning",
+        "nvidia/nemotron-3-ultra-550b-a55b:free": "Nemotron Ultra",
         "nvidia/nemotron-3.5-lightning-30b-a3b": "Nemotron Lightning 30B",
         "nvidia/nemotron-3-ultra-550b-a55b": "Nemotron Ultra 550B",
         "deepseek-ai/deepseek-v4-pro-0813": "DeepSeek V4 Pro",
@@ -112,31 +126,34 @@ def _build_runtime_footer(info: RuntimeInfo) -> str:
 
     Displays high-level execution timings in milliseconds:
     - AHJIN: AHJIN orchestration only (BERU, context assembly, model routing, provider setup).
+    - Provider: Observable external provider/API communication turnaround.
+    - Model: Observable model response / generation duration.
     - Tool: Actual tool execution time (individual tool rows when tools ran).
-    - Model: Actual model/provider streaming or invocation execution time.
     - Telegram: Telegram API delivery time (edit_text calls).
-    - Other: Residual = Total - AHJIN - Tools - Model - Telegram.
-              Only shown when measurable (> 50ms); covers unmeasured gaps such as
-              network TLS handshake before provider setup, context assembly not yet
-              instrumented, and inter-stage Python overhead.
+    - Other: Residual = Total - AHJIN - Provider - Tools - Model - Telegram.
+              Only shown when measurable (> 50ms).
     - Total: Complete end-to-end elapsed time.
 
     Detailed internal stages remain recorded in info.timing for diagnostics.
     Never exposes API keys, tokens, stack traces, or raw HTTP payloads.
     """
-    route_label = "\u21aa Rerouted" if info.was_rerouted else "Direct"
+    route_label = "↪ Rerouted" if info.was_rerouted else "Direct"
     health_icon = _health_icon(info.health_status)
 
     lines = [
         "━" * 18,
         "⚡ AHJIN Runtime",
-        f"Model: {_model_short_name(info.selected_model)}",
-        f"Route: {info.tier}",
         "",
-        "⏱ Latency",
+        f"Model: {_model_short_name(info.selected_model)}",
+        f"Provider: {_provider_display_name(info.provider_id)}",
+        f"Route: {info.tier}",
     ]
 
+    lines.append("")
+    lines.append("⏱ Latency")
+
     timing = info.timing
+    has_provider_timing = False
     if timing:
         # AHJIN orchestration overhead only (strictly disjoint from Tool & Model;
         # tool_planner LLM duration is subtracted to avoid double counting, and
@@ -154,15 +171,25 @@ def _build_runtime_footer(info: RuntimeInfo) -> str:
         if ahjin_ms == 0.0 and info.ahjin_internal_ms > 0:
             ahjin_ms = info.ahjin_internal_ms
 
-        model_ms = (
-            timing.get(STAGE_STREAM_PROCESSING, 0.0)
-            or timing.get(STAGE_MODEL_GENERATION, 0.0)
-            or info.model_api_ms
-        )
+        provider_ms = timing.get(STAGE_TIME_TO_FIRST_TOKEN, 0.0) or info.provider_api_ms
+        model_ms = timing.get(STAGE_MODEL_GENERATION, 0.0) or info.model_api_ms
+
+        if provider_ms > 0 or info.provider_api_ms > 0 or STAGE_TIME_TO_FIRST_TOKEN in timing:
+            has_provider_timing = True
+
+        if provider_ms == 0.0 and model_ms == 0.0:
+            model_ms = (
+                timing.get(STAGE_STREAM_PROCESSING, 0.0)
+                or info.model_api_ms
+            )
+
         telegram_ms = timing.get(STAGE_TELEGRAM_DELIVERY, 0.0)
     else:
         ahjin_ms = info.ahjin_internal_ms
+        provider_ms = info.provider_api_ms
         model_ms = info.model_api_ms
+        if provider_ms > 0 or info.provider_api_ms > 0:
+            has_provider_timing = True
         telegram_ms = 0.0
 
     # Sum explicit per-tool durations for "other" budget calculation
@@ -172,6 +199,8 @@ def _build_runtime_footer(info: RuntimeInfo) -> str:
     )
 
     lines.append(f"├─ AHJIN: {int(round(ahjin_ms))}ms")
+    if has_provider_timing and provider_ms > 0:
+        lines.append(f"├─ Provider: {int(round(provider_ms))}ms")
 
     # Tool execution latency (only if tools actually executed)
     if tool_timings:
@@ -193,40 +222,73 @@ def _build_runtime_footer(info: RuntimeInfo) -> str:
         lines.append(f"├─ Telegram: {int(round(telegram_ms))}ms")
 
     # "Other" residual bucket:
-    # Total - AHJIN - all tool execution - Model - Telegram
+    # Total - AHJIN - Provider - all tool execution - Model - Telegram
     # Represents unmeasured gaps (provider TLS handshake, context assembly if untracked, etc.)
     # Only shown when it exceeds 50ms to avoid noise from sub-millisecond Python overhead.
     if info.total_ms > 0:
-        other_ms = info.total_ms - ahjin_ms - total_tool_ms - model_ms - telegram_ms
+        effective_provider_ms = provider_ms if has_provider_timing else 0.0
+        other_ms = (
+            info.total_ms
+            - ahjin_ms
+            - effective_provider_ms
+            - total_tool_ms
+            - model_ms
+            - telegram_ms
+        )
         if other_ms > 50.0:
             lines.append(f"├─ Other: {int(round(other_ms))}ms")
 
     lines.append(f"└─ Total: {int(round(info.total_ms))}ms")
 
+    # Path section immediately follows Latency section
     lines.append("")
+    lines.append(f"Path: {route_label}")
+
+    if info.was_rerouted:
+        reason = info.failure_reason or info.harness_failure_reason or info.planner_failure_reason
+
+        # Case 2 or Case 4: Planner rerouted
+        if info.planner_was_rerouted and info.planner_failed_model:
+            planner_target = (
+                info.planner_selected_model
+                or (info.planner_route_history[-1] if info.planner_route_history else None)
+                or info.selected_model
+            )
+            p_from = _model_short_name(info.planner_failed_model)
+            p_to = _model_short_name(planner_target)
+            lines.append(f"Planner: {p_from} → {p_to}")
+
+        # Case 3 or Case 4: Harness rerouted
+        if info.harness_was_rerouted and info.harness_failed_model:
+            h_from = _model_short_name(info.harness_failed_model)
+            h_to = _model_short_name(info.selected_model)
+            lines.append(f"Harness: {h_from} → {h_to}")
+        elif info.planner_was_rerouted and not info.harness_was_rerouted:
+            lines.append(
+                f"Harness: {_model_short_name(info.selected_model)}"
+            )
+
+        # Note: "From:" line removed per UX refinement specification
+
+        if reason:
+            lines.append(f"Reason: {reason}")
 
     # Tool metadata line (only when tool(s) executed)
+    tool_meta_names = []
     if tool_timings:
-        disp_names = [_tool_display_name(t[0]) for t in tool_timings]
-        if len(disp_names) == 1:
-            lines.append(f"Tool: {disp_names[0]}")
-        else:
-            lines.append(f"Tools: {', '.join(disp_names)}")
+        tool_meta_names = [_tool_display_name(t[0]) for t in tool_timings]
     elif info.executed_tools:
-        disp_names = [_tool_display_name(t) for t in info.executed_tools]
-        if len(disp_names) == 1:
-            lines.append(f"Tool: {disp_names[0]}")
+        tool_meta_names = [_tool_display_name(t) for t in info.executed_tools]
+
+    if tool_meta_names:
+        lines.append("")
+        if len(tool_meta_names) == 1:
+            lines.append(f"Tool: {tool_meta_names[0]}")
         else:
-            lines.append(f"Tools: {', '.join(disp_names)}")
+            lines.append(f"Tools: {', '.join(tool_meta_names)}")
 
-    lines.append(f"Path: {route_label}")
+    lines.append("")
     lines.append(f"Health: {health_icon} {info.health_status.title()}")
-
-    if info.was_rerouted and info.failed_model:
-        lines.append(f"From: {_model_short_name(info.failed_model)}")
-        if info.failure_reason:
-            lines.append(f"Reason: {info.failure_reason}")
-
     lines.append("━" * 18)
     return "\n".join(lines)
 
