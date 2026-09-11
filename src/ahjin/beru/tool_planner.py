@@ -6,10 +6,12 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import TYPE_CHECKING, Any, cast
 
+import httpx
 import structlog
 
 from ahjin.beru.types import CapabilityRequirements
 from ahjin.core.config import settings
+from ahjin.models.router import CapabilityUnavailableError
 from ahjin.providers.types import ContextualizedPrompt
 from ahjin.tools.base import ToolInvocationRequest
 from ahjin.tools.system_info import SAFE_FIELDS_WHITELIST
@@ -23,6 +25,10 @@ logger = structlog.get_logger()
 # Default bounded timeout in seconds for intent planning calls.
 # Configurable via settings.tool_planner_timeout (default 15.0s).
 DEFAULT_PLANNER_TIMEOUT_SECONDS: float = settings.tool_planner_timeout
+
+# Defensive upper iteration bound solely to prevent infinite loops.
+# Normal candidate exhaustion is governed by ModelRouter raising CapabilityUnavailableError.
+_DEFENSIVE_MAX_ATTEMPTS: int = 50
 
 
 class PlannerStatus(str, Enum):
@@ -287,15 +293,22 @@ class ToolIntentPlanner:
         gateway: "ProviderGateway | None" = None,
         tool_registry: "ToolRegistry | None" = None,
         planner_timeout: float | None = None,
+        max_attempts: int | None = None,
     ) -> None:
         self.gateway = gateway
         self.tool_registry = tool_registry
         self.planner_timeout = (
             planner_timeout if planner_timeout is not None else settings.tool_planner_timeout
         )
+        self.max_attempts: int | None = max_attempts
 
     async def plan_tool_intent(self, text: str) -> PlannerResult:
         """Attempt to plan a structured tool invocation from natural language text.
+
+        Uses model-agnostic fallback via ModelRouter: if the primary candidate fails
+        (HTTP error, timeout, network error, invalid JSON), it is excluded and the next
+        eligible model candidate from the catalog is attempted until the recovery budget
+        is exhausted.
 
         Returns:
             A PlannerResult with status TOOL_SELECTED, NO_TOOL, or PLANNER_FAILURE.
@@ -312,237 +325,331 @@ class ToolIntentPlanner:
             system_instruction=_PLANNER_SYSTEM_PROMPT,
             user_instruction=text,
         )
+        requirements = CapabilityRequirements(
+            requires_reasoning=False,
+            requires_code=False,
+            requires_vision=False,
+        )
 
-        try:
-            # Use FAST tier model (MiniMax M3) for planning with bounded timeout
-            result = await asyncio.wait_for(
-                self.gateway.invoke(
-                    prompt=prompt,
-                    requirements=CapabilityRequirements(
-                        requires_reasoning=False,
-                        requires_code=False,
-                        requires_vision=False,
-                    ),
-                ),
-                timeout=self.planner_timeout,
-            )
-            raw_content = result.response.content.strip()
-            if not raw_content:
-                logger.warning("ToolIntentPlanner: Model returned empty response")
-                return PlannerResult(
-                    status=PlannerStatus.PLANNER_FAILURE,
-                    failure_reason="empty_response",
-                )
+        excluded_models: set[str] = set()
+        attempts = 0
+        last_failure_reason: str = "unknown"
+        max_loop_iterations = (
+            self.max_attempts if self.max_attempts is not None else _DEFENSIVE_MAX_ATTEMPTS
+        )
 
-            # Clean possible markdown code fences if model included them
-            if raw_content.startswith("```"):
-                lines = raw_content.splitlines()
-                raw_content = "\n".join(
-                    [line for line in lines if not line.startswith("```")]
-                ).strip()
+        while attempts < max_loop_iterations:
+            attempts += 1
+
+            current_model_id: str | None = None
+            if hasattr(self.gateway, "router"):
+                try:
+                    candidate = self.gateway.router.select_model(
+                        requirements, excluded_model_ids=excluded_models
+                    )
+                    current_model_id = candidate.model_id
+                except CapabilityUnavailableError:
+                    if not last_failure_reason or last_failure_reason == "unknown":
+                        last_failure_reason = "capability_unavailable"
+                    logger.warning(
+                        "ToolIntentPlanner: No capable models available from router",
+                        attempt=attempts,
+                        excluded_models=list(excluded_models),
+                    )
+                    break
 
             try:
-                parsed_obj: Any = json.loads(raw_content)
-            except json.JSONDecodeError:
-                # Try finding JSON substring between first { and last }
-                first_brace = raw_content.find("{")
-                last_brace = raw_content.rfind("}")
-                if first_brace != -1 and last_brace > first_brace:
-                    try:
-                        parsed_obj = json.loads(raw_content[first_brace : last_brace + 1])
-                    except json.JSONDecodeError as exc:
+                result = await asyncio.wait_for(
+                    self.gateway.invoke(
+                        prompt=prompt,
+                        requirements=requirements,
+                        excluded_model_ids=excluded_models,
+                    ),
+                    timeout=self.planner_timeout,
+                )
+                selected_model_id = result.selection.model_id
+                raw_content = result.response.content.strip()
+                if not raw_content:
+                    logger.warning(
+                        "ToolIntentPlanner: Model returned empty response",
+                        model_id=selected_model_id,
+                        attempt=attempts,
+                    )
+                    excluded_models.add(selected_model_id)
+                    last_failure_reason = "empty_response"
+                    continue
+
+                # Clean possible markdown code fences if model included them
+                if raw_content.startswith("```"):
+                    lines = raw_content.splitlines()
+                    raw_content = "\n".join(
+                        [line for line in lines if not line.startswith("```")]
+                    ).strip()
+
+                try:
+                    parsed_obj: Any = json.loads(raw_content)
+                except json.JSONDecodeError:
+                    # Try finding JSON substring between first { and last }
+                    first_brace = raw_content.find("{")
+                    last_brace = raw_content.rfind("}")
+                    if first_brace != -1 and last_brace > first_brace:
+                        try:
+                            parsed_obj = json.loads(raw_content[first_brace : last_brace + 1])
+                        except json.JSONDecodeError as exc:
+                            logger.warning(
+                                "ToolIntentPlanner: Model produced invalid JSON",
+                                error=str(exc),
+                                model_id=selected_model_id,
+                                attempt=attempts,
+                            )
+                            excluded_models.add(selected_model_id)
+                            last_failure_reason = "invalid_json"
+                            continue
+                    else:
                         logger.warning(
-                            "ToolIntentPlanner: Model produced invalid JSON",
-                            error=str(exc),
+                            "ToolIntentPlanner: No JSON object found in response",
+                            raw_preview=raw_content[:100],
+                            model_id=selected_model_id,
+                            attempt=attempts,
                         )
-                        return PlannerResult(
-                            status=PlannerStatus.PLANNER_FAILURE,
-                            failure_reason="invalid_json",
-                        )
-                else:
+                        excluded_models.add(selected_model_id)
+                        last_failure_reason = "invalid_json"
+                        continue
+
+                parsed_dict: dict[str, Any] = cast(dict[str, Any], parsed_obj)
+
+                tool_name_val: Any = parsed_dict.get("tool_name")
+                if not isinstance(tool_name_val, str) or not tool_name_val:
                     logger.warning(
-                        "ToolIntentPlanner: No JSON object found in response",
-                        raw_preview=raw_content[:100],
+                        "ToolIntentPlanner: Model response missing tool_name",
+                        model_id=selected_model_id,
+                        attempt=attempts,
                     )
-                    return PlannerResult(
-                        status=PlannerStatus.PLANNER_FAILURE,
-                        failure_reason="invalid_json",
+                    excluded_models.add(selected_model_id)
+                    last_failure_reason = "missing_tool_name"
+                    continue
+
+                # Explicit NO_TOOL state
+                if tool_name_val.lower() == "none":
+                    logger.info(
+                        "ToolIntentPlanner: Determined no tool needed",
+                        intent="conversational/reasoning",
+                        model_id=selected_model_id,
                     )
+                    return PlannerResult(status=PlannerStatus.NO_TOOL)
 
-            parsed_dict: dict[str, Any] = cast(dict[str, Any], parsed_obj)
+                tool_name: str = tool_name_val
 
-            tool_name_val: Any = parsed_dict.get("tool_name")
-            if not isinstance(tool_name_val, str) or not tool_name_val:
-                logger.warning("ToolIntentPlanner: Model response missing tool_name")
-                return PlannerResult(
-                    status=PlannerStatus.PLANNER_FAILURE,
-                    failure_reason="missing_tool_name",
+                # 1. Authority Validation: Tool MUST exist in ToolRegistry
+                if not self.tool_registry.has_tool(tool_name):
+                    logger.warning(
+                        "ToolIntentPlanner: Model requested unregistered tool",
+                        requested_tool=tool_name,
+                        model_id=selected_model_id,
+                        attempt=attempts,
+                    )
+                    excluded_models.add(selected_model_id)
+                    last_failure_reason = f"unregistered_tool:{tool_name}"
+                    continue
+
+                raw_params: Any = parsed_dict.get("parameters")
+                parameters: dict[str, Any] = (
+                    cast(dict[str, Any], raw_params) if isinstance(raw_params, dict) else {}
                 )
 
-            # Explicit NO_TOOL state
-            if tool_name_val.lower() == "none":
+                # 2. Parameter Whitelist Validation
+                if tool_name == "system_info":
+                    raw_fields: Any = parameters.get("fields")
+                    field_list: list[Any] = (
+                        cast(list[Any], raw_fields)
+                        if isinstance(raw_fields, list)
+                        else ["all_safe"]
+                    )
+
+                    valid_fields: list[str] = [
+                        str(x)
+                        for x in field_list
+                        if isinstance(x, str) and x in SAFE_FIELDS_WHITELIST
+                    ]
+                    if not valid_fields:
+                        logger.warning(
+                            "ToolIntentPlanner: Model requested invalid fields for system_info",
+                            requested_fields=raw_fields,
+                            model_id=selected_model_id,
+                            attempt=attempts,
+                        )
+                        excluded_models.add(selected_model_id)
+                        last_failure_reason = "invalid_system_info_fields"
+                        continue
+                    parameters["fields"] = valid_fields
+
+                elif tool_name == "file_search":
+                    raw_query: Any = parameters.get("query")
+                    if not isinstance(raw_query, str) or not raw_query.strip():
+                        logger.warning(
+                            "ToolIntentPlanner: Invalid or missing query for file_search",
+                            model_id=selected_model_id,
+                            attempt=attempts,
+                        )
+                        excluded_models.add(selected_model_id)
+                        last_failure_reason = "invalid_file_search_query"
+                        continue
+                    parameters["query"] = raw_query.strip()
+                    raw_path: Any = parameters.get("path")
+                    if raw_path and isinstance(raw_path, str) and raw_path.strip():
+                        parameters["path"] = raw_path.strip()
+
+                elif tool_name == "file_read":
+                    raw_path: Any = parameters.get("path")
+                    raw_query: Any = parameters.get("query")
+                    if not raw_path or not str(raw_path).strip():
+                        if raw_query and str(raw_query).strip():
+                            raw_path = "."
+                        else:
+                            logger.warning(
+                                "ToolIntentPlanner: Invalid or missing path for file_read",
+                                model_id=selected_model_id,
+                                attempt=attempts,
+                            )
+                            excluded_models.add(selected_model_id)
+                            last_failure_reason = "invalid_file_read_path"
+                            continue
+                    parameters["path"] = str(raw_path).strip()
+                    if raw_query and isinstance(raw_query, str):
+                        parameters["query"] = raw_query.strip()
+
+                elif tool_name == "file_send":
+                    raw_path: Any = parameters.get("path")
+                    raw_query: Any = parameters.get("query")
+                    if not raw_path or not str(raw_path).strip():
+                        if raw_query and str(raw_query).strip():
+                            raw_path = "."
+                        else:
+                            logger.warning(
+                                "ToolIntentPlanner: Invalid or missing path for file_send",
+                                model_id=selected_model_id,
+                                attempt=attempts,
+                            )
+                            excluded_models.add(selected_model_id)
+                            last_failure_reason = "invalid_file_send_path"
+                            continue
+                    parameters["path"] = str(raw_path).strip()
+                    if raw_query and isinstance(raw_query, str):
+                        parameters["query"] = raw_query.strip()
+
+                elif tool_name == "web_search":
+                    raw_query: Any = parameters.get("query")
+                    if not isinstance(raw_query, str) or not raw_query.strip():
+                        logger.warning(
+                            "ToolIntentPlanner: Invalid or missing query for web_search",
+                            model_id=selected_model_id,
+                            attempt=attempts,
+                        )
+                        excluded_models.add(selected_model_id)
+                        last_failure_reason = "invalid_web_search_query"
+                        continue
+                    parameters["query"] = raw_query.strip()
+                    raw_recency: Any = parameters.get("recency_days")
+                    if isinstance(raw_recency, int) and raw_recency > 0:
+                        parameters["recency_days"] = raw_recency
+                    raw_max: Any = parameters.get("max_results")
+                    if isinstance(raw_max, int) and raw_max > 0:
+                        parameters["max_results"] = raw_max
+
+                elif tool_name == "browser":
+                    raw_action: Any = parameters.get("action")
+                    if not isinstance(raw_action, str) or not raw_action.strip():
+                        if "url" in parameters:
+                            parameters["action"] = "navigate"
+                        else:
+                            parameters["action"] = "observe"
+                    else:
+                        parameters["action"] = raw_action.strip().lower()
+
+                raw_reasoning: Any = parsed_dict.get("requires_reasoning")
+                requires_reasoning = (
+                    bool(raw_reasoning) if isinstance(raw_reasoning, bool) else False
+                )
+
                 logger.info(
-                    "ToolIntentPlanner: Determined no tool needed (conversational/reasoning intent)"
+                    "ToolIntentPlanner: Planned structured tool intent",
+                    tool_name=tool_name,
+                    parameters=parameters,
+                    requires_reasoning=requires_reasoning,
+                    model_id=selected_model_id,
+                    attempt=attempts,
                 )
-                return PlannerResult(status=PlannerStatus.NO_TOOL)
-
-            tool_name: str = tool_name_val
-
-            # 1. Authority Validation: Tool MUST exist in ToolRegistry
-            if not self.tool_registry.has_tool(tool_name):
-                logger.warning(
-                    "ToolIntentPlanner: Model requested unregistered tool",
-                    requested_tool=tool_name,
+                req = ToolInvocationRequest(
+                    tool_name=tool_name,
+                    parameters=parameters,
+                    requires_reasoning=requires_reasoning,
                 )
                 return PlannerResult(
-                    status=PlannerStatus.PLANNER_FAILURE,
-                    failure_reason=f"unregistered_tool:{tool_name}",
+                    status=PlannerStatus.TOOL_SELECTED,
+                    tool_intent=req,
                 )
 
-            raw_params: Any = parsed_dict.get("parameters")
-            parameters: dict[str, Any] = (
-                cast(dict[str, Any], raw_params) if isinstance(raw_params, dict) else {}
-            )
-
-            # 2. Parameter Whitelist Validation
-            if tool_name == "system_info":
-                raw_fields: Any = parameters.get("fields")
-                field_list: list[Any] = (
-                    cast(list[Any], raw_fields) if isinstance(raw_fields, list) else ["all_safe"]
+            except asyncio.TimeoutError:
+                failed_id = current_model_id
+                if failed_id:
+                    excluded_models.add(failed_id)
+                logger.warning(
+                    "ToolIntentPlanner: Intent planning timed out",
+                    timeout_seconds=self.planner_timeout,
+                    failed_model=failed_id,
+                    attempt=attempts,
+                    max_attempts=max_loop_iterations,
                 )
+                last_failure_reason = "timeout"
+                continue
 
-                valid_fields: list[str] = [
-                    str(x) for x in field_list if isinstance(x, str) and x in SAFE_FIELDS_WHITELIST
-                ]
-                if not valid_fields:
-                    logger.warning(
-                        "ToolIntentPlanner: Model requested invalid fields for system_info",
-                        requested_fields=raw_fields,
-                    )
-                    return PlannerResult(
-                        status=PlannerStatus.PLANNER_FAILURE,
-                        failure_reason="invalid_system_info_fields",
-                    )
-                parameters["fields"] = valid_fields
+            except CapabilityUnavailableError as cap_err:
+                logger.warning(
+                    "ToolIntentPlanner: No capable models available",
+                    error=str(cap_err),
+                    attempt=attempts,
+                )
+                if not last_failure_reason or last_failure_reason == "unknown":
+                    last_failure_reason = "capability_unavailable"
+                break
 
-            elif tool_name == "file_search":
-                raw_query: Any = parameters.get("query")
-                if not isinstance(raw_query, str) or not raw_query.strip():
-                    logger.warning("ToolIntentPlanner: Invalid or missing query for file_search")
-                    return PlannerResult(
-                        status=PlannerStatus.PLANNER_FAILURE,
-                        failure_reason="invalid_file_search_query",
-                    )
-                parameters["query"] = raw_query.strip()
-                raw_path: Any = parameters.get("path")
-                if raw_path and isinstance(raw_path, str) and raw_path.strip():
-                    parameters["path"] = raw_path.strip()
+            except (httpx.HTTPStatusError, httpx.RequestError) as http_err:
+                failed_id = getattr(http_err, "model_id", current_model_id)
+                if failed_id:
+                    excluded_models.add(str(failed_id))
+                logger.warning(
+                    "ToolIntentPlanner: Planning provider HTTP/network error",
+                    error=str(http_err),
+                    failed_model=failed_id,
+                    attempt=attempts,
+                    max_attempts=max_loop_iterations,
+                )
+                last_failure_reason = f"provider_error: {http_err}"
+                continue
 
-            elif tool_name == "file_read":
-                raw_path: Any = parameters.get("path")
-                raw_query: Any = parameters.get("query")
-                if not raw_path or not str(raw_path).strip():
-                    if raw_query and str(raw_query).strip():
-                        raw_path = "."
-                    else:
-                        logger.warning("ToolIntentPlanner: Invalid or missing path for file_read")
-                        return PlannerResult(
-                            status=PlannerStatus.PLANNER_FAILURE,
-                            failure_reason="invalid_file_read_path",
-                        )
-                parameters["path"] = str(raw_path).strip()
-                if raw_query and isinstance(raw_query, str):
-                    parameters["query"] = raw_query.strip()
+            except Exception as exc:
+                failed_id = getattr(exc, "model_id", current_model_id)
+                if failed_id:
+                    excluded_models.add(str(failed_id))
+                logger.warning(
+                    "ToolIntentPlanner: Planning provider unhandled error",
+                    error=str(exc),
+                    failed_model=failed_id,
+                    attempt=attempts,
+                    max_attempts=max_loop_iterations,
+                )
+                last_failure_reason = f"provider_error: {exc}"
+                continue
 
-            elif tool_name == "file_send":
-                raw_path: Any = parameters.get("path")
-                raw_query: Any = parameters.get("query")
-                if not raw_path or not str(raw_path).strip():
-                    if raw_query and str(raw_query).strip():
-                        raw_path = "."
-                    else:
-                        logger.warning("ToolIntentPlanner: Invalid or missing path for file_send")
-                        return PlannerResult(
-                            status=PlannerStatus.PLANNER_FAILURE,
-                            failure_reason="invalid_file_send_path",
-                        )
-                parameters["path"] = str(raw_path).strip()
-                if raw_query and isinstance(raw_query, str):
-                    parameters["query"] = raw_query.strip()
-
-            elif tool_name == "web_search":
-                raw_query: Any = parameters.get("query")
-                if not isinstance(raw_query, str) or not raw_query.strip():
-                    logger.warning("ToolIntentPlanner: Invalid or missing query for web_search")
-                    return PlannerResult(
-                        status=PlannerStatus.PLANNER_FAILURE,
-                        failure_reason="invalid_web_search_query",
-                    )
-                parameters["query"] = raw_query.strip()
-                raw_recency: Any = parameters.get("recency_days")
-                if isinstance(raw_recency, int) and raw_recency > 0:
-                    parameters["recency_days"] = raw_recency
-                raw_max: Any = parameters.get("max_results")
-                if isinstance(raw_max, int) and raw_max > 0:
-                    parameters["max_results"] = raw_max
-
-            elif tool_name == "browser":
-                raw_action: Any = parameters.get("action")
-                if not isinstance(raw_action, str) or not raw_action.strip():
-                    # Infer navigate if url present, else observe
-                    if "url" in parameters:
-                        parameters["action"] = "navigate"
-                    else:
-                        parameters["action"] = "observe"
-                else:
-                    parameters["action"] = raw_action.strip().lower()
-
-            raw_reasoning: Any = parsed_dict.get("requires_reasoning")
-            requires_reasoning = (
-                bool(raw_reasoning) if isinstance(raw_reasoning, bool) else False
-            )
-
-            logger.info(
-                "ToolIntentPlanner: Planned structured tool intent",
-                tool_name=tool_name,
-                parameters=parameters,
-                requires_reasoning=requires_reasoning,
-            )
-            req = ToolInvocationRequest(
-                tool_name=tool_name,
-                parameters=parameters,
-                requires_reasoning=requires_reasoning,
-            )
-            return PlannerResult(
-                status=PlannerStatus.TOOL_SELECTED,
-                tool_intent=req,
-            )
-
-        except asyncio.TimeoutError:
-            logger.warning(
-                "ToolIntentPlanner: Intent planning timed out",
-                timeout_seconds=self.planner_timeout,
-            )
-            return PlannerResult(
-                status=PlannerStatus.PLANNER_FAILURE,
-                failure_reason="timeout",
-            )
-        except json.JSONDecodeError as json_err:
-            logger.warning(
-                "ToolIntentPlanner: Model produced invalid JSON",
-                error=str(json_err),
-            )
-            return PlannerResult(
-                status=PlannerStatus.PLANNER_FAILURE,
-                failure_reason="invalid_json",
-            )
-        except Exception as exc:
-            logger.warning(
-                "ToolIntentPlanner: Planning provider error",
-                error=str(exc),
-            )
-            return PlannerResult(
-                status=PlannerStatus.PLANNER_FAILURE,
-                failure_reason=f"provider_error: {exc}",
-            )
+        logger.warning(
+            "ToolIntentPlanner: All planning attempts exhausted or failed",
+            attempts=attempts,
+            max_attempts=max_loop_iterations,
+            failure_reason=last_failure_reason,
+            excluded_models=list(excluded_models),
+        )
+        return PlannerResult(
+            status=PlannerStatus.PLANNER_FAILURE,
+            failure_reason=last_failure_reason,
+        )
 
