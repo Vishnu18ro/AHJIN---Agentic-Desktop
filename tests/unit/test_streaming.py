@@ -361,7 +361,9 @@ def test_footer_build_includes_all_buckets_no_other_when_zero() -> None:
     from ahjin.core.types import RuntimeInfo
     from ahjin.interfaces.telegram.bot import _build_runtime_footer
     from ahjin.telemetry import (
-        STAGE_BERU_ANALYSIS, STAGE_MODEL_ROUTING, STAGE_STREAM_PROCESSING,
+        STAGE_BERU_ANALYSIS,
+        STAGE_MODEL_ROUTING,
+        STAGE_STREAM_PROCESSING,
         STAGE_TELEGRAM_DELIVERY,
     )
 

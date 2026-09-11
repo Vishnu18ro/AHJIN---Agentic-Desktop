@@ -3,7 +3,7 @@
 import pytest
 
 from ahjin.beru.orchestrator import BeruOrchestrator
-from ahjin.beru.tool_planner import ToolIntentPlanner
+from ahjin.beru.tool_planner import PlannerStatus, ToolIntentPlanner
 from ahjin.beru.types import StepType
 from ahjin.core.types import TaskContext, TaskRequest, UserIntent
 from ahjin.harness.gateway import ProviderGateway
@@ -151,7 +151,8 @@ async def test_llm_planner_rejects_unregistered_tool() -> None:
     planner = ToolIntentPlanner(gateway=gateway, tool_registry=tool_registry)
     req = await planner.plan_tool_intent("Delete my system files")
 
-    assert req is None  # Must reject invented tool!
+    assert not req  # Must reject invented tool!
+    assert req.status == PlannerStatus.PLANNER_FAILURE
 
 
 @pytest.mark.asyncio
@@ -164,7 +165,8 @@ async def test_llm_planner_rejects_unwhitelisted_parameters() -> None:
     planner = ToolIntentPlanner(gateway=gateway, tool_registry=tool_registry)
     req = await planner.plan_tool_intent("Give me passwords and api keys")
 
-    assert req is None  # Must reject un-whitelisted parameter fields!
+    assert not req  # Must reject un-whitelisted parameter fields!
+    assert req.status == PlannerStatus.PLANNER_FAILURE
 
 
 # --- 3. Hybrid Deterministic Fallback Tests ---
@@ -294,13 +296,16 @@ async def test_llm_planner_nested_discovery_extraction() -> None:
 def test_may_require_tool_screening() -> None:
     from ahjin.beru.tools import may_require_tool
 
-    # Ordinary conversation / Q&A -> False (skip LLM planner)
-    assert may_require_tool("hi") is False
-    assert may_require_tool("hello") is False
-    assert may_require_tool("what is machine learning?") is False
-    assert may_require_tool("explain transformers") is False
+    # Phase 7: may_require_tool() is a conservative pass-through gate.
+    # It returns True for ALL requests — including conversational ones.
+    # The ToolIntentPlanner is the semantic decision point, NOT this gate.
+    # Conversational requests reach the planner; the planner returns None.
+    assert may_require_tool("hi") is True
+    assert may_require_tool("hello") is True
+    assert may_require_tool("what is machine learning?") is True
+    assert may_require_tool("explain transformers") is True
 
-    # Tool-potential requests -> True (run planner / resolver)
+    # Tool-potential requests also return True (unchanged from Phase 6)
     assert may_require_tool("what OS am I using?") is True
     assert may_require_tool("find my resume") is True
     assert may_require_tool("send my resume") is True
@@ -351,8 +356,9 @@ async def test_tool_planner_times_out_gracefully() -> None:
     planner = ToolIntentPlanner(gateway=gateway, tool_registry=tool_registry, planner_timeout=0.1)
     req = await planner.plan_tool_intent("What operating system am I using?")
 
-    # Timeout must return None gracefully without throwing
-    assert req is None
+    # Timeout must return PLANNER_FAILURE gracefully without throwing
+    assert not req
+    assert req.status == PlannerStatus.PLANNER_FAILURE
 
 
 # --- 7. File Search Chaining and Deterministic Fallback Tests ---
@@ -560,9 +566,13 @@ async def test_ambiguous_query_still_invokes_planner() -> None:
         async def invoke(self, request: ModelInvocationRequest) -> ModelInvocationResponse:
             planner_invoked.append(True)
             # Return a valid file_search response
+            content = (
+                '{"tool_name": "file_search", '
+                '"parameters": {"query": "contract", "path": "documents"}}'
+            )
             return ModelInvocationResponse(
                 invocation_id=request.invocation_id,
-                content='{"tool_name": "file_search", "parameters": {"query": "contract", "path": "documents"}}',
+                content=content,
                 provider_id=self.provider_id,
                 model_id=request.model_id,
             )
@@ -626,7 +636,7 @@ async def test_hi_uses_exactly_one_model_invocation_zero_planner() -> None:
             planner_invoked.append(True)
             return ModelInvocationResponse(
                 invocation_id=request.invocation_id,
-                content="{}",
+                content='{"tool_name": "none", "parameters": {}, "requires_reasoning": false}',
                 provider_id=self.provider_id,
                 model_id=request.model_id,
             )
@@ -655,11 +665,11 @@ async def test_hi_uses_exactly_one_model_invocation_zero_planner() -> None:
     request = _make_request("HI")
     plan = await orchestrator.plan(request)
 
-    # Zero planner invocations
-    assert planner_invoked == [], (
-        "LLM ToolIntentPlanner was invoked for 'HI'. "
-        "Plain conversation must NOT trigger the tool planner."
-    )
+    # Phase 7: the planner now runs on ALL requests (conservative gate).
+    # For 'HI', the planner returns None (no tool) — planner_invoked will be [True].
+    # What matters is: zero tool steps, exactly 1 model step.
+    # The planner correctly identifies 'HI' as non-tool and returns None.
+    # (planner_invoked count verification intentionally removed per Phase 7 architecture)
 
     # Zero tool steps, exactly 1 model step
     tool_steps = [s for s in plan.steps if s.step_type == StepType.TOOL_INVOCATION]

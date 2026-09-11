@@ -33,6 +33,7 @@ class OpenRouterProvider(BaseModelProvider):
         default_model: str | None = None,
         max_tokens: int | None = None,
         timeout_seconds: float | None = None,
+        client: httpx.AsyncClient | None = None,
     ) -> None:
         self.api_key = settings.openrouter_api_key if api_key is None else api_key
         self.base_url = (base_url or settings.openrouter_base_url).rstrip("/")
@@ -42,6 +43,8 @@ class OpenRouterProvider(BaseModelProvider):
         self.timeout_seconds = (
             timeout_seconds if timeout_seconds is not None else settings.openrouter_timeout_seconds
         )
+        self._client: httpx.AsyncClient | None = client
+        self._owns_client: bool = client is None
 
         # Fast-fail: do not allow construction with unconfigured credentials.
         if not self.api_key:
@@ -56,6 +59,41 @@ class OpenRouterProvider(BaseModelProvider):
 
     def get_default_model_id(self) -> str:
         return self.default_model
+
+    def _get_client(self) -> httpx.AsyncClient:
+        """Get or lazily create persistent httpx.AsyncClient with connection pooling."""
+        if self._client is None or self._client.is_closed:
+            limits = httpx.Limits(
+                max_keepalive_connections=20,
+                max_connections=50,
+                keepalive_expiry=60.0,
+            )
+            self._client = httpx.AsyncClient(
+                timeout=self.timeout_seconds,
+                limits=limits,
+            )
+            self._owns_client = True
+        return self._client
+
+    async def aclose(self) -> None:
+        """Explicitly and safely close the persistent HTTP client."""
+        if self._client is not None and not self._client.is_closed:
+            await self._client.aclose()
+            self._client = None
+
+    def close(self) -> None:
+        """Synchronous cleanup for non-async teardown paths."""
+        if self._client is not None and not self._client.is_closed:
+            try:
+                import asyncio
+                loop = asyncio.get_event_loop()
+                if loop.is_running():
+                    asyncio.create_task(self._client.aclose())
+                else:
+                    loop.run_until_complete(self._client.aclose())
+            except Exception:
+                pass
+            self._client = None
 
     async def invoke(self, request: ModelInvocationRequest) -> ModelInvocationResponse:
         """Invoke OpenRouter OpenAI-compatible chat completions API."""
@@ -98,14 +136,14 @@ class OpenRouterProvider(BaseModelProvider):
         logger.info("[PROFILE] Calling OpenRouter API start", model=payload["model"], url=url)
 
         t0_net = time.monotonic()
-        async with httpx.AsyncClient(timeout=self.timeout_seconds) as client:
-            resp = await client.post(url, json=payload, headers=headers)
-            t_net_ms = (time.monotonic() - t0_net) * 1000.0
-            resp.raise_for_status()
+        client = self._get_client()
+        resp = await client.post(url, json=payload, headers=headers)
+        t_net_ms = (time.monotonic() - t0_net) * 1000.0
+        resp.raise_for_status()
 
-            t0_parse = time.monotonic()
-            data: dict[str, Any] = resp.json()
-            t_parse_ms = (time.monotonic() - t0_parse) * 1000.0
+        t0_parse = time.monotonic()
+        data: dict[str, Any] = resp.json()
+        t_parse_ms = (time.monotonic() - t0_parse) * 1000.0
 
         elapsed_ms = (time.monotonic() - start_time) * 1000.0
 
@@ -196,10 +234,10 @@ class OpenRouterProvider(BaseModelProvider):
 
         url = f"{self.base_url}/chat/completions"
 
-        async with httpx.AsyncClient(timeout=self.timeout_seconds) as client:
-            async with client.stream("POST", url, json=payload, headers=headers) as response:
-                response.raise_for_status()
-                async for line in response.aiter_lines():
+        client = self._get_client()
+        async with client.stream("POST", url, json=payload, headers=headers) as response:
+            response.raise_for_status()
+            async for line in response.aiter_lines():
                     line = line.strip()
                     if not line or line.startswith(":"):
                         continue

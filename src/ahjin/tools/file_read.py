@@ -75,18 +75,34 @@ class FileReadTool(BaseTool):
         ):
             if query:
                 target_q = query.lower()
-                matched_child: Path | None = None
+                preferred_exts = {".pdf", ".docx", ".doc", ".txt"}
+                candidates: list[tuple[int, float, Path]] = []
                 for child in resolved_path.rglob("*"):
                     if (
                         child.is_file()
                         and not self.path_policy.is_sensitive_file(child)
                         and not self.path_policy.is_system_blocked(child)
                     ):
-                        if target_q in child.name.lower() or target_q in child.stem.lower():
-                            matched_child = child
-                            break
-                if matched_child is not None:
-                    resolved_path = matched_child
+                        name_lower = child.name.lower()
+                        stem_lower = child.stem.lower()
+                        if target_q not in name_lower and target_q not in stem_lower:
+                            continue
+                        if stem_lower == target_q:
+                            rank = 1
+                        elif stem_lower.startswith(target_q) or stem_lower.endswith(target_q):
+                            rank = 2
+                        elif child.suffix.lower() in preferred_exts:
+                            rank = 3
+                        else:
+                            rank = 4
+                        try:
+                            mtime = child.stat().st_mtime
+                        except Exception:
+                            mtime = 0.0
+                        candidates.append((rank, mtime, child))
+                if candidates:
+                    candidates.sort(key=lambda item: (item[0], -item[1]))
+                    resolved_path = candidates[0][2]
 
         # If path does not exist or is a directory with no match yet, try search_roots
         if (

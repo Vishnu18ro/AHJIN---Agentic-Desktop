@@ -7,6 +7,7 @@ from ahjin.models.types import (
     ModelCapabilities,
     ModelDescriptor,
     ModelLimits,
+    ModelRole,
     ModelTier,
 )
 
@@ -18,6 +19,7 @@ __all__ = [
     "ModelHealthStatus",
     "ModelHealthTracker",
     "ModelLimits",
+    "ModelRole",
     "ModelRouter",
     "ModelSelectionResult",
     "ModelTier",

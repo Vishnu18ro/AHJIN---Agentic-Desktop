@@ -25,7 +25,59 @@ _EXCLUDED_DIRS: frozenset[str] = frozenset({
     ".pytest_cache",
     ".mypy_cache",
     ".ruff_cache",
+    ".cache",
+    "appdata",
+    "$recycle.bin",
 })
+
+
+def _is_excluded_directory(dir_name: str, parent_dir: Path | None = None) -> bool:
+    """Check whether a directory is an irrelevant temporary, cache, or excluded directory.
+
+    Prevents temporary folders (e.g. .tmp.driveupload, .cache) and nested git repos
+    from starving legitimate user directories within the _MAX_FILES_SCANNED budget.
+    """
+    dl = dir_name.lower()
+    if dl in _EXCLUDED_DIRS:
+        return True
+    if dl.startswith((".", "$recycle.bin")):
+        return True
+    if dl.endswith(".tmp") or dl in ("temp", "tmp"):
+        return True
+    if parent_dir is not None:
+        try:
+            if (parent_dir / dir_name / ".git").exists():
+                return True
+        except (OSError, PermissionError):
+            pass
+    return False
+
+
+class SearchResultString(str):
+    """String subclass that preserves discovered_paths and is_ambiguous metadata."""
+
+    discovered_paths: list[str]
+    is_ambiguous: bool
+
+    def __new__(
+        cls,
+        text: str,
+        discovered_paths: list[str] | None = None,
+        is_ambiguous: bool = False,
+    ) -> "SearchResultString":
+        obj = super().__new__(cls, text)
+        obj.discovered_paths = discovered_paths or []
+        obj.is_ambiguous = is_ambiguous
+        return obj
+
+    def get(self, key: str, default: Any = None) -> Any:
+        if key == "text":
+            return str(self)
+        if key == "discovered_paths":
+            return self.discovered_paths
+        if key == "is_ambiguous":
+            return self.is_ambiguous
+        return default
 
 
 class FileSearchTool(BaseTool):
@@ -99,9 +151,9 @@ class FileSearchTool(BaseTool):
 
         search_mode = str(request.parameters.get("search_mode", "auto")).strip().lower()
 
-        user_path_matches: list[tuple[int, str]] = []
+        user_path_matches: list[tuple[int, str, Path]] = []
         user_content_matches: list[str] = []
-        code_path_matches: list[tuple[int, str]] = []
+        code_path_matches: list[tuple[int, str, Path]] = []
         code_content_matches: list[str] = []
         seen_matched_files: set[Path] = set()
 
@@ -122,8 +174,9 @@ class FileSearchTool(BaseTool):
             start_dir = search_root if search_root.is_dir() else search_root.parent
 
             for root, dirs, files in os.walk(start_dir):
-                # Prune excluded directories in-place
-                dirs[:] = [d for d in dirs if d.lower() not in _EXCLUDED_DIRS]
+                # Prune excluded and temporary directories in-place
+                root_path = Path(root)
+                dirs[:] = [d for d in dirs if not _is_excluded_directory(d, root_path)]
 
                 for file_name in files:
                     total_matches = (
@@ -217,9 +270,9 @@ class FileSearchTool(BaseTool):
                                 f"- [FILE/PATH MATCH] {display_path_str} (Full path: {file_path})"
                             )
                             if is_code_file:
-                                code_path_matches.append((path_rank, p_entry))
+                                code_path_matches.append((path_rank, p_entry, file_path))
                             else:
-                                user_path_matches.append((path_rank, p_entry))
+                                user_path_matches.append((path_rank, p_entry, file_path))
 
                         for c_entry in content_matches:
                             if is_code_file:
@@ -247,13 +300,30 @@ class FileSearchTool(BaseTool):
             [item[1] for item in code_path_matches] + code_content_matches
         )
 
+        ranked_user_paths = [item[2] for item in user_path_matches]
+        ranked_code_paths = [item[2] for item in code_path_matches]
+        all_discovered_paths = ranked_user_paths + ranked_code_paths
+
+        # Ambiguity check: if multiple distinct candidate files share the top score
+        is_ambiguous = False
+        if len(user_path_matches) > 1:
+            top_rank = user_path_matches[0][0]
+            top_rank_files = [item[2] for item in user_path_matches if item[0] == top_rank]
+            if len(top_rank_files) > 1:
+                # Ambiguous if multiple different file candidates have the same best rank
+                is_ambiguous = True
+
         total_matches = len(user_file_entries) + len(project_code_entries)
         if total_matches == 0:
             output = f"No matches found for query '{query}'."
         else:
+            header_prefix = (
+                f"Multiple matching files found ({total_matches} candidates)"
+                if is_ambiguous
+                else f"Found {total_matches} match(es)"
+            )
             sections: list[str] = [
-                f"Found {total_matches} match(es) for query '{query}' "
-                f"(scanned {files_scanned} files):"
+                f"{header_prefix} for query '{query}' (scanned {files_scanned} files):"
             ]
             if user_file_entries:
                 sections.append("\n[USER FILES & DOCUMENTS]\n" + "\n".join(user_file_entries))
@@ -264,10 +334,15 @@ class FileSearchTool(BaseTool):
             output = "\n".join(sections)
 
         latency_ms = (time.monotonic() - t0) * 1000.0
+        output_res = SearchResultString(
+            output,
+            discovered_paths=[str(p) for p in all_discovered_paths],
+            is_ambiguous=is_ambiguous,
+        )
         return ToolInvocationResult(
             invocation_id=request.invocation_id,
             success=True,
-            output=output,
+            output=output_res,
             error=None,
             latency_ms=latency_ms,
         )

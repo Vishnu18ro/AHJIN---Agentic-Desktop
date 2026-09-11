@@ -60,6 +60,7 @@ class PlanStep(BaseModel):
     step_type: StepType = StepType.MODEL_INVOCATION
     model_intent: ModelStepIntent | None = None
     tool_intent: ToolInvocationRequest | None = None
+    deterministic_output: str | None = None
     depends_on: list[UUID] = Field(default_factory=list)  # pyright: ignore[reportUnknownVariableType]
     timeout_seconds: float = 30.0
 

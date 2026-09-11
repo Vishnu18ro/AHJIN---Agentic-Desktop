@@ -107,9 +107,113 @@ class HarnessRunner:
         local_escalation_hint: LocalExecutionResult | None = None
 
         for step in plan.steps:
+            if step.deterministic_output is not None:
+                step_res = StepResult(
+                    step_id=step.step_id,
+                    success=True,
+                    output_text=step.deterministic_output,
+                )
+                last_output = step.deterministic_output
+                state.step_results.append(step_res)
+                runtime_info = RuntimeInfo(
+                    selected_model="deterministic",
+                    tier="FAST",
+                    provider_id="ahjin",
+                    ahjin_internal_ms=0.0,
+                    model_api_ms=0.0,
+                    total_ms=0.0,
+                    tool_timings=[],
+                    executed_tools=[],
+                    was_rerouted=False,
+                    failed_model=None,
+                    failure_reason=None,
+                    health_status="HEALTHY",
+                )
+                continue
+
             if step.step_type == StepType.MODEL_INVOCATION and step.model_intent:
                 intent = step.model_intent
                 strategy = intent.execution_strategy
+
+                # Check if prior tool satisfied request without needing model generation
+                prior_successful_tools = [r for r in state.step_results if r.success]
+                has_file_send = any(
+                    r.tool_name == "file_send" or bool(r.attachment_paths)
+                    for r in prior_successful_tools
+                )
+                has_ambiguity = any(r.is_ambiguous for r in state.step_results)
+                requires_reasoning = intent.capability_requirements.requires_reasoning
+
+                if has_ambiguity and not requires_reasoning:
+                    ambig_res = next(r for r in state.step_results if r.is_ambiguous)
+                    step_res = StepResult(
+                        step_id=step.step_id,
+                        success=True,
+                        output_text=ambig_res.output_text,
+                    )
+                    last_output = ambig_res.output_text
+                    state.step_results.append(step_res)
+
+                    tool_timings, executed_tools = _extract_tool_metadata(
+                        state.step_results, timer
+                    )
+                    total_tool_ms = sum(t[1] for t in tool_timings) if tool_timings else 0.0
+                    runtime_info = RuntimeInfo(
+                        selected_model="deterministic",
+                        tier="FAST",
+                        provider_id="ahjin",
+                        ahjin_internal_ms=0.0,
+                        model_api_ms=0.0,
+                        total_ms=round(total_tool_ms, 1),
+                        tool_timings=tool_timings,
+                        executed_tools=executed_tools,
+                        was_rerouted=False,
+                        failed_model=None,
+                        failure_reason=None,
+                        health_status="HEALTHY",
+                    )
+                    continue
+
+                if has_file_send and not requires_reasoning:
+                    send_res = next(
+                        r for r in reversed(prior_successful_tools)
+                        if r.tool_name == "file_send" or r.attachment_paths
+                    )
+                    att_names = [p.name for p in send_res.attachment_paths]
+                    if len(att_names) == 1:
+                        confirm_text = f"Sent {att_names[0]} 📄"
+                    elif len(att_names) > 1:
+                        confirm_text = f"Sent {len(att_names)} files: {', '.join(att_names)} 📄"
+                    else:
+                        confirm_text = "File sent successfully 📄"
+
+                    step_res = StepResult(
+                        step_id=step.step_id,
+                        success=True,
+                        output_text=confirm_text,
+                    )
+                    last_output = confirm_text
+                    state.step_results.append(step_res)
+
+                    tool_timings, executed_tools = _extract_tool_metadata(
+                        state.step_results, timer
+                    )
+                    total_tool_ms = sum(t[1] for t in tool_timings) if tool_timings else 0.0
+                    runtime_info = RuntimeInfo(
+                        selected_model="deterministic",
+                        tier="FAST",
+                        provider_id="ahjin",
+                        ahjin_internal_ms=0.0,
+                        model_api_ms=0.0,
+                        total_ms=round(total_tool_ms, 1),
+                        tool_timings=tool_timings,
+                        executed_tools=executed_tools,
+                        was_rerouted=False,
+                        failed_model=None,
+                        failure_reason=None,
+                        health_status="HEALTHY",
+                    )
+                    continue
 
                 # Strategy fields that govern execution behaviour
                 max_attempts: int = strategy.max_recovery_attempts
@@ -371,6 +475,52 @@ class HarnessRunner:
                         error=err,
                     )
             elif step.step_type == StepType.TOOL_INVOCATION:
+                if step.tool_intent:
+                    tool_name = step.tool_intent.tool_name
+                    prior_search = next(
+                        (r for r in reversed(state.step_results) if r.tool_name == "file_search"),
+                        None,
+                    )
+                    if prior_search is not None and tool_name in ("file_send", "file_read"):
+                        if prior_search.is_ambiguous:
+                            ambig_msg = (
+                                prior_search.output_text
+                                or (
+                                    "Multiple matching files found. "
+                                    "Please specify which file you would like."
+                                )
+                            )
+                            step_res = StepResult(
+                                step_id=step.step_id,
+                                success=False,
+                                is_ambiguous=True,
+                                output_text=ambig_msg,
+                                tool_name=tool_name,
+                            )
+                            last_output = ambig_msg
+                            state.step_results.append(step_res)
+                            continue
+
+                        if prior_search.discovered_paths:
+                            discovered_path = str(prior_search.discovered_paths[0])
+                            step.tool_intent.parameters["path"] = discovered_path
+                            step.tool_intent.parameters.pop("query", None)
+                        else:
+                            q_str = step.tool_intent.parameters.get("query", "")
+                            not_found_msg = (
+                                prior_search.output_text
+                                or f"No matching files found for '{q_str}'."
+                            )
+                            step_res = StepResult(
+                                step_id=step.step_id,
+                                success=False,
+                                output_text=not_found_msg,
+                                tool_name=tool_name,
+                            )
+                            last_output = not_found_msg
+                            state.step_results.append(step_res)
+                            continue
+
                 t0_tool = time.perf_counter()
                 if timer is not None:
                     timer.start_stage(STAGE_TOOL_EXECUTION)
@@ -385,12 +535,16 @@ class HarnessRunner:
                 if step_res.output_text is not None:
                     last_output = step_res.output_text
 
+        file_attachments: list[Path] = [
+            att_path for s_res in state.step_results for att_path in s_res.attachment_paths
+        ]
         return TaskResult(
             task_id=plan.task_id,
             correlation_id=plan.correlation_id,
             success=True,
             output_text=last_output,
             runtime_info=runtime_info,
+            file_attachments=file_attachments,
             local_escalation_hint=local_escalation_hint,
         )
 
@@ -413,9 +567,117 @@ class HarnessRunner:
         local_escalation_hint: LocalExecutionResult | None = None
 
         for step in plan.steps:
+            if step.deterministic_output is not None:
+                step_res = StepResult(
+                    step_id=step.step_id,
+                    success=True,
+                    output_text=step.deterministic_output,
+                )
+                last_output = step.deterministic_output
+                state.step_results.append(step_res)
+                runtime_info = RuntimeInfo(
+                    selected_model="deterministic",
+                    tier="FAST",
+                    provider_id="ahjin",
+                    ahjin_internal_ms=0.0,
+                    model_api_ms=0.0,
+                    total_ms=0.0,
+                    tool_timings=[],
+                    executed_tools=[],
+                    was_rerouted=False,
+                    failed_model=None,
+                    failure_reason=None,
+                    health_status="HEALTHY",
+                )
+                yield step.deterministic_output, None
+                continue
+
             if step.step_type == StepType.MODEL_INVOCATION and step.model_intent:
                 intent = step.model_intent
                 strategy = intent.execution_strategy
+
+                # Check if prior tool satisfied request without needing model generation
+                prior_successful_tools = [r for r in state.step_results if r.success]
+                has_file_send = any(
+                    r.tool_name == "file_send" or bool(r.attachment_paths)
+                    for r in prior_successful_tools
+                )
+                has_ambiguity = any(r.is_ambiguous for r in state.step_results)
+                requires_reasoning = intent.capability_requirements.requires_reasoning
+
+                if has_ambiguity and not requires_reasoning:
+                    ambig_res = next(r for r in state.step_results if r.is_ambiguous)
+                    yield ambig_res.output_text or "", None
+                    step_res = StepResult(
+                        step_id=step.step_id,
+                        success=True,
+                        output_text=ambig_res.output_text,
+                    )
+                    last_output = ambig_res.output_text
+                    state.step_results.append(step_res)
+
+                    tool_timings, executed_tools = _extract_tool_metadata(
+                        state.step_results, timer
+                    )
+                    total_tool_ms = sum(t[1] for t in tool_timings) if tool_timings else 0.0
+                    runtime_info = RuntimeInfo(
+                        selected_model="deterministic",
+                        tier="FAST",
+                        provider_id="ahjin",
+                        ahjin_internal_ms=0.0,
+                        model_api_ms=0.0,
+                        total_ms=round(total_tool_ms, 1),
+                        tool_timings=tool_timings,
+                        executed_tools=executed_tools,
+                        was_rerouted=False,
+                        failed_model=None,
+                        failure_reason=None,
+                        health_status="HEALTHY",
+                    )
+                    continue
+
+                if has_file_send and not requires_reasoning:
+                    send_res = next(
+                        r for r in reversed(prior_successful_tools)
+                        if r.tool_name == "file_send" or r.attachment_paths
+                    )
+                    att_names = [p.name for p in send_res.attachment_paths]
+                    if len(att_names) == 1:
+                        confirm_text = f"Sent {att_names[0]} 📄"
+                    elif len(att_names) > 1:
+                        confirm_text = f"Sent {len(att_names)} files: {', '.join(att_names)} 📄"
+                    else:
+                        confirm_text = "File sent successfully 📄"
+
+                    yield confirm_text, None
+
+                    step_res = StepResult(
+                        step_id=step.step_id,
+                        success=True,
+                        output_text=confirm_text,
+                    )
+                    last_output = confirm_text
+                    state.step_results.append(step_res)
+
+                    tool_timings, executed_tools = _extract_tool_metadata(
+                        state.step_results, timer
+                    )
+                    total_tool_ms = sum(t[1] for t in tool_timings) if tool_timings else 0.0
+                    runtime_info = RuntimeInfo(
+                        selected_model="deterministic",
+                        tier="FAST",
+                        provider_id="ahjin",
+                        ahjin_internal_ms=0.0,
+                        model_api_ms=0.0,
+                        total_ms=round(total_tool_ms, 1),
+                        tool_timings=tool_timings,
+                        executed_tools=executed_tools,
+                        was_rerouted=False,
+                        failed_model=None,
+                        failure_reason=None,
+                        health_status="HEALTHY",
+                    )
+                    continue
 
                 max_attempts: int = strategy.max_recovery_attempts
                 require_verification: bool = strategy.require_verification
@@ -651,6 +913,54 @@ class HarnessRunner:
                     yield "", final_task_result
                     return
             elif step.step_type == StepType.TOOL_INVOCATION:
+                if step.tool_intent:
+                    tool_name = step.tool_intent.tool_name
+                    prior_search = next(
+                        (r for r in reversed(state.step_results) if r.tool_name == "file_search"),
+                        None,
+                    )
+                    if prior_search is not None and tool_name in ("file_send", "file_read"):
+                        if prior_search.is_ambiguous:
+                            ambig_msg = (
+                                prior_search.output_text
+                                or (
+                                    "Multiple matching files found. "
+                                    "Please specify which file you would like."
+                                )
+                            )
+                            step_res = StepResult(
+                                step_id=step.step_id,
+                                success=False,
+                                is_ambiguous=True,
+                                output_text=ambig_msg,
+                                tool_name=tool_name,
+                            )
+                            last_output = ambig_msg
+                            state.step_results.append(step_res)
+                            yield ambig_msg, None
+                            continue
+
+                        if prior_search.discovered_paths:
+                            discovered_path = str(prior_search.discovered_paths[0])
+                            step.tool_intent.parameters["path"] = discovered_path
+                            step.tool_intent.parameters.pop("query", None)
+                        else:
+                            q_str = step.tool_intent.parameters.get("query", "")
+                            not_found_msg = (
+                                prior_search.output_text
+                                or f"No matching files found for '{q_str}'."
+                            )
+                            step_res = StepResult(
+                                step_id=step.step_id,
+                                success=False,
+                                output_text=not_found_msg,
+                                tool_name=tool_name,
+                            )
+                            last_output = not_found_msg
+                            state.step_results.append(step_res)
+                            yield not_found_msg, None
+                            continue
+
                 t0_tool = time.perf_counter()
                 if timer is not None:
                     timer.start_stage(STAGE_TOOL_EXECUTION)
@@ -724,8 +1034,18 @@ class HarnessRunner:
             res = await tool.execute(step.tool_intent)
             output_str: str | None = None
             attachment_paths: list[Path] = []
+            discovered_paths: list[Path] = []
+            is_ambiguous: bool = False
             output_obj: object = res.output
-            if isinstance(output_obj, dict):
+            if hasattr(output_obj, "discovered_paths"):
+                raw_disc = getattr(output_obj, "discovered_paths", [])
+                if isinstance(raw_disc, list):
+                    for dp in cast(list[Any], raw_disc):
+                        if isinstance(dp, (str, Path)):
+                            discovered_paths.append(Path(dp))
+                is_ambiguous = bool(getattr(output_obj, "is_ambiguous", False))
+                output_str = str(output_obj)
+            elif isinstance(output_obj, dict):
                 res_dict = cast(dict[str, Any], output_obj)
                 output_str = str(res_dict.get("text", ""))
                 raw_paths = res_dict.get("attachment_paths", [])
@@ -733,6 +1053,12 @@ class HarnessRunner:
                     for p in cast(list[Any], raw_paths):
                         if isinstance(p, (str, Path)):
                             attachment_paths.append(Path(p))
+                raw_disc = res_dict.get("discovered_paths", [])
+                if isinstance(raw_disc, list):
+                    for dp in cast(list[Any], raw_disc):
+                        if isinstance(dp, (str, Path)):
+                            discovered_paths.append(Path(dp))
+                is_ambiguous = bool(res_dict.get("is_ambiguous", False))
             elif res.output is not None:
                 output_str = str(res.output)
 
@@ -742,6 +1068,8 @@ class HarnessRunner:
                 output_text=output_str,
                 error=res.error,
                 attachment_paths=attachment_paths,
+                discovered_paths=discovered_paths,
+                is_ambiguous=is_ambiguous,
                 tool_name=tool_name,
             )
         except Exception as exc:

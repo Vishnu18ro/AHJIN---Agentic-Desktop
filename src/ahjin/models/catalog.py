@@ -2,7 +2,13 @@
 
 import structlog
 
-from ahjin.models.types import ModelCapabilities, ModelDescriptor, ModelLimits, ModelTier
+from ahjin.models.types import (
+    ModelCapabilities,
+    ModelDescriptor,
+    ModelLimits,
+    ModelRole,
+    ModelTier,
+)
 
 logger = structlog.get_logger()
 
@@ -21,6 +27,8 @@ class ModelCatalog:
             model_id=descriptor.model_id,
             provider_id=descriptor.provider_id,
             tier=descriptor.tier.value,
+            role=descriptor.role.value,
+            priority=descriptor.priority,
             quality_score=descriptor.quality_score,
             endpoint_verified=descriptor.endpoint_verified,
         )
@@ -34,27 +42,79 @@ class ModelCatalog:
     def list_models(self) -> list[ModelDescriptor]:
         """List all active registered model descriptors."""
         return [m for m in self._models.values() if m.is_active]
+
+
 def create_default_catalog() -> ModelCatalog:
-    """Create and return default ModelCatalog seeded with candidate models.
+    """Create and return default ModelCatalog seeded with Phase 6 production models.
 
-    Active catalog (7 models):
-      FAST  tier: Nemotron Lightning 30B (#1)
-      HEAVY tier: MiniMax M3 (#1 via OpenRouter), Nemotron Ultra (#2 via OpenRouter),
-                  Nemotron Ultra (#3 via NVIDIA Direct), Kimi K3 (#4 via NVIDIA Direct),
-                  DeepSeek V4 Pro (#5), DeepSeek V4 Flash (#6)
+    Phase 6 Architecture:
+      PRIMARY (Attempted First for ALL Requests):
+        - MiniMax M3 (OpenRouter, tier=ALL, priority=300)
 
-    Explicit preference is encoded in ``priority``. The router ranking formula
-    sorts strictly by priority (DESC) so that catalog preference ordering is always
-    preserved among eligible candidates.
+      LIGHT FALLBACK CHAIN (After MiniMax failure on FAST/LIGHT):
+        1. Nemotron Lightning (OpenRouter :free, priority=220)
+        2. Nemotron Lightning (NVIDIA Direct, priority=200)
+        3. Gemma 3 4B (Ollama Offline, priority=100)
+
+      HEAVY FALLBACK CHAIN (After MiniMax failure on HEAVY):
+        1. Nemotron Ultra (OpenRouter :free, priority=230)
+        2. Nemotron Ultra (NVIDIA Direct, priority=200)
+        3. Kimi K3 (NVIDIA Direct, priority=170)
+        4. DeepSeek V4 Pro (NVIDIA Direct, priority=150)
+        5. DeepSeek V4 Flash (NVIDIA Direct, priority=130)
+        6. Qwen 3 8B (Ollama Offline, priority=120)
     """
     catalog = ModelCatalog()
 
-    # 1. FAST EXECUTION TIER Candidate (Verified Active Endpoint)
+    # 1. PRIMARY MODEL — Attempted first for every request regardless of complexity
+    catalog.register(
+        ModelDescriptor(
+            model_id="minimax/minimax-m3",
+            provider_id="openrouter",
+            tier=ModelTier.ALL,
+            role=ModelRole.PRIMARY,
+            capabilities=ModelCapabilities(
+                reasoning=True,
+                coding=True,
+                vision=False,
+                tool_calling=True,
+                long_context=True,
+            ),
+            limits=ModelLimits(max_context_tokens=128000, max_output_tokens=4096),
+            priority=300,
+            quality_score=95,
+            endpoint_verified=True,
+        )
+    )
+
+    # 2. LIGHT FALLBACK #1: OpenRouter Nemotron Lightning Free
+    catalog.register(
+        ModelDescriptor(
+            model_id="nvidia/nemotron-3.5-lightning:free",
+            provider_id="openrouter",
+            tier=ModelTier.FAST,
+            role=ModelRole.LIGHT_FALLBACK,
+            capabilities=ModelCapabilities(
+                reasoning=True,
+                coding=True,
+                vision=False,
+                tool_calling=True,
+                long_context=False,
+            ),
+            limits=ModelLimits(max_context_tokens=128000, max_output_tokens=4096),
+            priority=220,
+            quality_score=85,
+            endpoint_verified=True,
+        )
+    )
+
+    # 3. LIGHT FALLBACK #2: NVIDIA Direct Nemotron Lightning 30B
     catalog.register(
         ModelDescriptor(
             model_id="nvidia/nemotron-3.5-lightning-30b-a3b",
             provider_id="nvidia",
             tier=ModelTier.FAST,
+            role=ModelRole.LIGHT_FALLBACK,
             capabilities=ModelCapabilities(
                 reasoning=False,
                 coding=True,
@@ -69,37 +129,13 @@ def create_default_catalog() -> ModelCatalog:
         )
     )
 
-    # 2. HEAVY / CORE REASONING TIER Candidates — V1 Benchmark Priority Order:
-    # #1 MiniMax M3 (250) -> #2 OpenRouter Nemotron Ultra (230) ->
-    # #3 NVIDIA Nemotron Ultra (200) -> #4 Kimi K3 (170) ->
-    # #5 DeepSeek Pro (150) -> #6 DeepSeek Flash (130)
-
-    # Priority #1: OpenRouter MiniMax M3 Free (Fastest Reasoning Model: 5.0s)
-    catalog.register(
-        ModelDescriptor(
-            model_id="minimax/minimax-m3:free",
-            provider_id="openrouter",
-            tier=ModelTier.HEAVY,
-            capabilities=ModelCapabilities(
-                reasoning=True,
-                coding=True,
-                vision=False,
-                tool_calling=True,
-                long_context=True,
-            ),
-            limits=ModelLimits(max_context_tokens=128000, max_output_tokens=4096),
-            priority=250,
-            quality_score=95,
-            endpoint_verified=True,
-        )
-    )
-
-    # Priority #2: OpenRouter Nemotron Ultra 550B Free (Reliable Fallback: 62.9s)
+    # 4. HEAVY FALLBACK #1: OpenRouter Nemotron Ultra 550B Free
     catalog.register(
         ModelDescriptor(
             model_id="nvidia/nemotron-3-ultra-550b-a55b:free",
             provider_id="openrouter",
             tier=ModelTier.HEAVY,
+            role=ModelRole.HEAVY_FALLBACK,
             capabilities=ModelCapabilities(
                 reasoning=True,
                 coding=True,
@@ -114,12 +150,13 @@ def create_default_catalog() -> ModelCatalog:
         )
     )
 
-    # Priority #3: NVIDIA Direct Nemotron Ultra 550B
+    # 5. HEAVY FALLBACK #2: NVIDIA Direct Nemotron Ultra 550B
     catalog.register(
         ModelDescriptor(
             model_id="nvidia/nemotron-3-ultra-550b-a55b",
             provider_id="nvidia",
             tier=ModelTier.HEAVY,
+            role=ModelRole.HEAVY_FALLBACK,
             capabilities=ModelCapabilities(
                 reasoning=True,
                 coding=True,
@@ -134,12 +171,13 @@ def create_default_catalog() -> ModelCatalog:
         )
     )
 
-    # Priority #4: NVIDIA Direct Kimi K3
+    # 6. HEAVY FALLBACK #3: NVIDIA Direct Kimi K3
     catalog.register(
         ModelDescriptor(
             model_id="moonshotai/kimi-k3",
             provider_id="nvidia",
             tier=ModelTier.HEAVY,
+            role=ModelRole.HEAVY_FALLBACK,
             capabilities=ModelCapabilities(
                 reasoning=True,
                 coding=True,
@@ -154,12 +192,13 @@ def create_default_catalog() -> ModelCatalog:
         )
     )
 
-    # Priority #5: DeepSeek V4 Pro
+    # 7. HEAVY FALLBACK #4: DeepSeek V4 Pro
     catalog.register(
         ModelDescriptor(
             model_id="deepseek-ai/deepseek-v4-pro-0813",
             provider_id="nvidia",
             tier=ModelTier.HEAVY,
+            role=ModelRole.HEAVY_FALLBACK,
             capabilities=ModelCapabilities(
                 reasoning=True,
                 coding=True,
@@ -174,12 +213,13 @@ def create_default_catalog() -> ModelCatalog:
         )
     )
 
-    # Priority #6: DeepSeek V4 Flash
+    # 8. HEAVY FALLBACK #5: DeepSeek V4 Flash
     catalog.register(
         ModelDescriptor(
             model_id="deepseek-ai/deepseek-v4-flash-0731",
             provider_id="nvidia",
             tier=ModelTier.HEAVY,
+            role=ModelRole.HEAVY_FALLBACK,
             capabilities=ModelCapabilities(
                 reasoning=True,
                 coding=True,
@@ -194,13 +234,13 @@ def create_default_catalog() -> ModelCatalog:
         )
     )
 
-    # 3. LOCAL OLLAMA MODELS (Registered descriptors; priorities below active cloud models)
-    # Local Fast Model: Gemma 3 4B
+    # 9. LOCAL OFFLINE FAST: Gemma 3 4B (Ollama)
     catalog.register(
         ModelDescriptor(
             model_id="gemma3:4b",
             provider_id="ollama",
             tier=ModelTier.FAST,
+            role=ModelRole.OFFLINE_FALLBACK,
             capabilities=ModelCapabilities(
                 reasoning=False,
                 coding=True,
@@ -215,12 +255,13 @@ def create_default_catalog() -> ModelCatalog:
         )
     )
 
-    # Local Heavy / Reasoning Model: Qwen 3 8B
+    # 10. LOCAL OFFLINE HEAVY: Qwen 3 8B (Ollama)
     catalog.register(
         ModelDescriptor(
             model_id="qwen3:8b",
             provider_id="ollama",
             tier=ModelTier.HEAVY,
+            role=ModelRole.OFFLINE_FALLBACK,
             capabilities=ModelCapabilities(
                 reasoning=True,
                 coding=True,

@@ -70,7 +70,9 @@ def _chunk_message(text: str, chunk_size: int = TELEGRAM_MAX_MESSAGE_LENGTH) -> 
 def _model_short_name(model_id: str) -> str:
     """Return a compact, human-readable model name for the footer."""
     label_map = {
+        "minimax/minimax-m3": "MiniMax M3",
         "minimax/minimax-m3:free": "MiniMax M3",
+        "nvidia/nemotron-3.5-lightning:free": "Nemotron Lightning (OpenRouter)",
         "nvidia/nemotron-3-ultra-550b-a55b:free": "Nemotron Ultra (OpenRouter)",
         "nvidia/nemotron-3.5-lightning-30b-a3b": "Nemotron Lightning 30B",
         "nvidia/nemotron-3-ultra-550b-a55b": "Nemotron Ultra 550B",

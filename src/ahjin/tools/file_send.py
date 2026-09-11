@@ -11,6 +11,7 @@ from ahjin.tools.base import BaseTool, ToolInvocationRequest, ToolInvocationResu
 
 _MAX_ATTACHMENT_SIZE_BYTES = 50 * 1024 * 1024  # 50 MB limit
 _MAX_BATCH_ATTACHMENTS = 5
+_MAX_FILES_SCANNED = 500
 _EXCLUDED_DIRS: frozenset[str] = frozenset({
     ".git",
     ".venv",
@@ -78,7 +79,10 @@ class FileSendTool(BaseTool):
                         target_exts.add(item_str if item_str.startswith(".") else f".{item_str}")
 
                 query_filter = str(request.parameters.get("query", "")).strip().lower()
+                skip_roots = ("pc", "downloads", "desktop", "documents", ".")
+                has_active_query = bool(query_filter and query_filter not in skip_roots)
 
+                dir_files: list[Path] = []
                 for child in resolved_path.rglob("*"):
                     if (
                         child.is_file()
@@ -87,24 +91,99 @@ class FileSendTool(BaseTool):
                     ):
                         if target_exts and child.suffix.lower() not in target_exts:
                             continue
-                        skip_roots = ("pc", "downloads", "desktop", "documents", ".")
-                        if query_filter and query_filter not in skip_roots:
-                            if (
-                                query_filter not in child.name.lower()
-                                and query_filter not in child.stem.lower()
-                            ):
+                        dir_files.append(child)
+
+                if dir_files:
+                    if has_active_query:
+                        scored_candidates: list[tuple[int, float, Path]] = []
+                        preferred_exts = {".pdf", ".docx", ".doc", ".txt"}
+                        for child in dir_files:
+                            stem_lower = child.stem.lower()
+                            name_lower = child.name.lower()
+                            if query_filter not in name_lower and query_filter not in stem_lower:
                                 continue
-                        candidate_files.append(child)
-                        if len(candidate_files) >= _MAX_BATCH_ATTACHMENTS:
-                            break
+
+                            # Rank scoring:
+                            # 1: exact stem match (e.g. resume == resume.pdf)
+                            # 2: stem stripped of trailing punctuation (e.g. resume- -> resume)
+                            # 3: stem starts with query (e.g. resumeI.pdf, resume_2026.pdf)
+                            # 4: stem starts with "my " + query (e.g. my resume.pdf)
+                            # 5: stem ends with query (e.g. tcs resume.pdf)
+                            # 6: other match with preferred document extension
+                            clean_stem = stem_lower.rstrip(" -_.")
+                            if stem_lower == query_filter:
+                                rank = 1
+                            elif clean_stem == query_filter:
+                                rank = 2
+                            elif stem_lower.startswith(query_filter):
+                                rank = 3
+                            elif stem_lower.startswith(f"my {query_filter}"):
+                                rank = 4
+                            elif stem_lower.endswith(query_filter):
+                                rank = 5
+                            elif child.suffix.lower() in preferred_exts:
+                                rank = 6
+                            else:
+                                rank = 7
+
+                            try:
+                                mtime = child.stat().st_mtime
+                            except Exception:
+                                mtime = 0.0
+
+                            scored_candidates.append((rank, mtime, child))
+
+                        if scored_candidates:
+                            # Sort by rank ascending (1 best), then mtime descending (newest first)
+                            scored_candidates.sort(key=lambda item: (item[0], -item[1]))
+                            best_rank = scored_candidates[0][0]
+                            top_tier = [item for item in scored_candidates if item[0] == best_rank]
+                            allow_batch = bool(request.parameters.get("batch", False))
+                            max_files = _MAX_BATCH_ATTACHMENTS if allow_batch else 1
+                            for _, _, best_file in top_tier:
+                                candidate_files.append(best_file)
+                                if len(candidate_files) >= max_files:
+                                    break
+                    elif len(dir_files) == 1:
+                        candidate_files.append(dir_files[0])
+                    else:
+                        # Multiple files present without a query to disambiguate
+                        latency_ms = (time.monotonic() - t0) * 1000.0
+                        samples = [f.name for f in dir_files[:4]]
+                        sample_str = ", ".join(samples)
+                        return ToolInvocationResult(
+                            invocation_id=request.invocation_id,
+                            success=False,
+                            output=None,
+                            error=AhjinError(
+                                code="AMBIGUOUS_DIRECTORY_TARGET",
+                                message=(
+                                    f"Directory '{resolved_path.name}' contains multiple files. "
+                                    f"Please specify which file to send (e.g. {sample_str})."
+                                ),
+                                category=ErrorCategory.VALIDATION,
+                            ),
+                            latency_ms=latency_ms,
+                        )
 
         if not candidate_files:
             # 2. Try search_roots for keyword / shortcut / relative subpath discovery
-            is_roots_safe, search_roots, _ = self.path_policy.get_search_roots(
-                target_path_str
+            search_target = (
+                str(query_param).strip()
+                if (target_path_str in (".", "") and query_param)
+                else target_path_str
             )
-            if is_roots_safe and search_roots:
-                query_term = str(request.parameters.get("query", target_path_str)).strip().lower()
+            is_roots_safe, search_roots, _ = self.path_policy.get_search_roots(
+                search_target
+            )
+            if not is_roots_safe or not search_roots:
+                # If target was relative or not found as shortcut, try all authorized roots
+                if target_path_str in (".", "") or query_param:
+                    _, search_roots, _ = self.path_policy.get_search_roots(".")
+
+            if search_roots:
+                query_term = str(query_param or target_path_str).strip().lower()
+                scanned_count = 0
                 for s_root in search_roots:
                     if s_root.is_file() and not self.path_policy.is_sensitive_file(s_root):
                         candidate_files.append(s_root)
@@ -112,6 +191,9 @@ class FileSendTool(BaseTool):
                         for root_dir, dirs, files in os.walk(s_root):
                             dirs[:] = [d for d in dirs if d.lower() not in _EXCLUDED_DIRS]
                             for fname in files:
+                                scanned_count += 1
+                                if scanned_count > _MAX_FILES_SCANNED:
+                                    break
                                 child = Path(root_dir) / fname
                                 if (
                                     not self.path_policy.is_sensitive_file(child)
@@ -125,11 +207,13 @@ class FileSendTool(BaseTool):
                                         ):
                                             continue
                                     candidate_files.append(child)
-                                    if len(candidate_files) >= _MAX_BATCH_ATTACHMENTS:
-                                        break
-                            if len(candidate_files) >= _MAX_BATCH_ATTACHMENTS:
+                            hit_limit = (
+                                len(candidate_files) >= _MAX_BATCH_ATTACHMENTS
+                                or scanned_count > _MAX_FILES_SCANNED
+                            )
+                            if hit_limit:
                                 break
-                        if candidate_files:
+                        if candidate_files or scanned_count > _MAX_FILES_SCANNED:
                             break
 
         if not candidate_files:

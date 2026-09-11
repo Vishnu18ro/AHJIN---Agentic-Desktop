@@ -158,8 +158,10 @@ class ModelRouter:
                     max_latency_ms=max_lat,
                 )
 
-        # 5. Tier Determination (Match target tier if possible, else fallback)
-        tier_matched = [m for m in healthy_models if m.tier == target_tier]
+        # 5. Tier Determination (Match target tier or ModelTier.ALL if possible, else fallback)
+        tier_matched = [
+            m for m in healthy_models if m.tier == target_tier or m.tier == ModelTier.ALL
+        ]
         candidates = tier_matched if tier_matched else healthy_models
 
         # 6. RANKING PASS — Two-key sort: catalog preference ordinal first, then quality.
@@ -202,12 +204,13 @@ class ModelRouter:
         assert best_model is not None
 
         elapsed_ms = (time.monotonic() - t0) * 1000.0
+        reported_tier = target_tier if best_model.tier == ModelTier.ALL else best_model.tier
 
         logger.info(
             "[PROFILE] ModelRouter selection complete",
             selected_model=best_model.model_id,
             provider_id=best_model.provider_id,
-            tier=best_model.tier.value,
+            tier=reported_tier.value,
             target_tier=target_tier.value,
             quality_score=best_model.quality_score,
             quality_preference=quality_preference,
@@ -217,7 +220,7 @@ class ModelRouter:
         return ModelSelectionResult(
             provider_id=best_model.provider_id,
             model_id=best_model.model_id,
-            tier=best_model.tier,
+            tier=reported_tier,
             selection_time_ms=elapsed_ms,
             max_output_tokens=best_model.limits.max_output_tokens,
         )

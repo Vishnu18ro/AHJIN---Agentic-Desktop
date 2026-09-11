@@ -10,6 +10,16 @@ class ModelTier(str, Enum):
 
     FAST = "FAST"
     HEAVY = "HEAVY"
+    ALL = "ALL"
+
+
+class ModelRole(str, Enum):
+    """Model role in the routing topology."""
+
+    PRIMARY = "PRIMARY"
+    LIGHT_FALLBACK = "LIGHT_FALLBACK"
+    HEAVY_FALLBACK = "HEAVY_FALLBACK"
+    OFFLINE_FALLBACK = "OFFLINE_FALLBACK"
 
 
 class ModelCapabilities(BaseModel):
@@ -35,6 +45,7 @@ class ModelDescriptor(BaseModel):
     model_id: str
     provider_id: str
     tier: ModelTier = ModelTier.FAST
+    role: ModelRole = ModelRole.LIGHT_FALLBACK
     capabilities: ModelCapabilities = Field(default_factory=ModelCapabilities)
     limits: ModelLimits = Field(default_factory=ModelLimits)
     priority: int = 100

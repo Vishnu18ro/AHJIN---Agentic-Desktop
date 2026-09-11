@@ -15,6 +15,7 @@ class ToolInvocationRequest(BaseModel):
     invocation_id: UUID = Field(default_factory=uuid4)
     tool_name: str
     parameters: dict[str, Any] = Field(default_factory=dict)
+    requires_reasoning: bool = False
 
 
 class ToolInvocationResult(BaseModel):

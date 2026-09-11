@@ -92,18 +92,34 @@ class ContextAssembler:
                 result_blocks.append(block)
             if result_blocks:
                 grounding_note = (
-                    "INSTRUCTION TO MODEL: Base your response strictly on the tool observation "
-                    "results above. If web search results are provided, answer using those "
-                    "retrieved sources and cite relevant source URLs or domains. If a search "
-                    "returned no results or failed, state clearly that search did not return "
-                    "results and do not invent information. For local files, clearly "
-                    "distinguish actual user files from source/test files."
+                    "AUTHORITATIVE SYSTEM CONSTRAINTS:\n"
+                    "1. All [TOOL RESULTS] above are real, verified, and authoritative executions "
+                    "on this computer.\n"
+                    "2. You have authorized filesystem access through AHJIN. NEVER state "
+                    "'I cannot access your filesystem', 'I don't have access to your computer', "
+                    "or 'I cannot send files'. Doing so is strictly false.\n"
+                    "3. If files were retrieved, read, or sent above, acknowledge the action "
+                    "accurately and base your response strictly on the tool observation results.\n"
+                    "4. If web search results are provided, answer using those retrieved sources "
+                    "and cite relevant source URLs or domains. If a search returned no results "
+                    "or failed, state clearly that search did not return results and do not "
+                    "invent information."
                 )
                 user_instruction = (
                     user_instruction + "\n\n" + "\n\n".join(result_blocks) + "\n\n" + grounding_note
                 )
 
+        system_instruction = "You are AHJIN 2.0, an Agentic AI Operating Layer."
+        if prior_results:
+            system_instruction = (
+                "You are AHJIN 2.0, an Agentic AI Operating Layer with authorized local tool "
+                "execution. You have full authorized access to local files and system tools "
+                "on this machine. Never claim you cannot access the filesystem, browse local "
+                "files, or send files."
+            )
+
         return ContextualizedPrompt(
+            system_instruction=system_instruction,
             conversation_history=task_context.conversation_history,
             user_instruction=user_instruction,
         )

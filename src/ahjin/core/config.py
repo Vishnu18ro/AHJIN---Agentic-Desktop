@@ -38,6 +38,10 @@ class Settings(BaseSettings):
     ollama_timeout_seconds: float = 60.0
     ollama_embedding_model: str = "bge-m3:latest"
 
+    # Tool Intent Planner
+    # Default 15.0s bounded timeout accommodates OpenRouter latency while preventing stalls.
+    tool_planner_timeout: float = 15.0
+
     model_config = SettingsConfigDict(
         env_file=".env",
         env_file_encoding="utf-8",

@@ -1,6 +1,48 @@
-"""BERU Tool Intent Resolver — Deterministic tool signal detection."""
+import re
+from pathlib import Path
 
 from ahjin.tools.base import ToolInvocationRequest
+
+_QUOTED_WINDOWS_PATH_RE = re.compile(
+    r'["\']([a-zA-Z]:[\\/][^"\'<>:|?*\r\n\t]+)["\']'
+)
+_UNQUOTED_WINDOWS_PATH_RE = re.compile(
+    r'[a-zA-Z]:[\\/](?:[^\s<>:"|?*\r\n\t]+[\\/]?)*'
+)
+
+
+def extract_windows_path(text: str) -> tuple[str, bool] | None:
+    """Extract a Windows absolute path and classify whether it is a directory or exact file.
+
+    Returns:
+        tuple of (cleaned_path_str, is_directory) if found, else None.
+    """
+    quoted_match = _QUOTED_WINDOWS_PATH_RE.search(text)
+    if quoted_match:
+        raw_path = quoted_match.group(1).strip()
+    else:
+        unquoted_match = _UNQUOTED_WINDOWS_PATH_RE.search(text)
+        if not unquoted_match:
+            return None
+        raw_path = unquoted_match.group(0).strip(" \t\r\n'\"<>,")
+
+    if not raw_path:
+        return None
+
+    # Check if syntactically or physically a directory
+    is_dir = raw_path.endswith(("\\", "/"))
+    if not is_dir:
+        try:
+            p = Path(raw_path)
+            if p.exists() and p.is_dir():
+                is_dir = True
+            elif not p.suffix:
+                # No file extension typically implies directory path
+                is_dir = True
+        except Exception:
+            pass
+
+    return raw_path, is_dir
 
 _SYSTEM_INFO_PHRASES: tuple[str, ...] = (
     "operating system",
@@ -35,7 +77,9 @@ _FILE_SEARCH_PREFIXES: tuple[str, ...] = (
     "find file ",
     "find a file ",
     "find files ",
-    "find the ",
+    # NOTE: "find the " was deliberately removed — it is too broad and falsely
+    # matches non-filesystem requests like "find the bug in my code".
+    # The semantic planner handles ambiguous "find" requests correctly.
     "where is my ",
     "where is the file ",
     "where is the ",
@@ -79,59 +123,32 @@ _FOLDER_HINTS: tuple[tuple[str, str], ...] = (
 )
 
 
-_TOOL_TRIGGER_KEYWORDS: frozenset[str] = frozenset({
-    # System info
-    "os", "system", "platform", "cpu", "ram", "memory", "hardware", "cwd",
-    # File actions & formats
-    "file", "files", "folder", "folders", "directory", "document", "documents",
-    "pdf", "txt", "csv", "docx", "zip", "resume", "notes", "archive", "attachment",
-    # Web search & recency
-    "google", "bing", "search", "web", "online", "weather", "latest", "current",
-    "news", "today", "stock", "price", "score", "recent",
-    # Browser & web apps
-    "browser", "whatsapp", "gmail", "youtube", "chrome", "edge", "website",
-    "webpage", "url", "http", "https", "site", "screenshot",
-})
-
-_TOOL_TRIGGER_PHRASES: tuple[str, ...] = (
-    # System
-    "what os", "which os", "operating system", "python version", "system info", "about this system",
-    # File queries & actions
-    "find file", "search file", "read file", "open file", "send file", "attach file",
-    "where is", "look for", "list files", "find my", "send my", "read my", "inside folder",
-    "page 1", "page 2", "page 3", "page number",
-    # Web search
-    "search for", "look up", "find online", "current weather", "latest news", "search the web",
-    # Browser
-    "open whatsapp", "open google", "go to", "take a screenshot", "click on", "type in",
-)
-
-
 def may_require_tool(text: str) -> bool:
-    """Determine if a request text potentially requires tool evaluation.
+    """Conservative structural gate — ToolIntentPlanner is the semantic decision point.
 
-    Fast deterministic check to prevent unnecessary LLM planning invocations
-    for ordinary conversation, coding, or Q&A requests.
+    This function does NOT enumerate tool-related vocabulary or attempt semantic
+    classification. Its contract is: when uncertain, return True and let the planner
+    decide. The planner is responsible for the semantic judgment of whether a tool
+    is needed.
 
     Returns:
-        True if the text contains explicit tool signals or tool-potential keywords/phrases.
-        False if the text is ordinary conversation or general knowledge Q&A.
+        True for all requests (planner runs and makes the semantic decision).
+        The Windows path check documents intent for filesystem-context requests
+        but does not change behaviour since the default is already True.
+
+    Invariants:
+        - No keyword-based routing.
+        - No token-length heuristics (short requests may be tool requests).
+        - No hardcoded phrase patterns for semantic exclusion.
+        - When in doubt: True.
     """
-    if detect_tool_intent(text) is not None:
+    # Windows absolute paths explicitly confirm filesystem context.
+    # Documented here for clarity, but the default return True covers this anyway.
+    if _QUOTED_WINDOWS_PATH_RE.search(text) or _UNQUOTED_WINDOWS_PATH_RE.search(text):
         return True
 
-    lower_text = text.lower()
-
-    # Check multi-word tool trigger phrases
-    if any(phrase in lower_text for phrase in _TOOL_TRIGGER_PHRASES):
-        return True
-
-    # Tokenize words (stripping common punctuation)
-    words = frozenset(
-        w.strip(".,?!:;()[]{}'\"") for w in lower_text.split()
-    )
-
-    return bool(words & _TOOL_TRIGGER_KEYWORDS)
+    # Conservative default: delegate all semantic judgment to ToolIntentPlanner.
+    return True
 
 
 def detect_tool_intent(text: str) -> ToolInvocationRequest | None:
