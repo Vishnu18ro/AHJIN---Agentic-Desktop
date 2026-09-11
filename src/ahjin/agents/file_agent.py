@@ -497,8 +497,8 @@ class FileAgent:
                 return
             
             # Use the newly created image path
-            if result.output and isinstance(result.output, dict) and "output_path" in result.output:
-                file_path = Path(result.output["output_path"])
+            if result.output and isinstance(result.output, dict) and "attachment_paths" in result.output and result.output["attachment_paths"]:
+                file_path = Path(result.output["attachment_paths"][0])
                 size_bytes = file_path.stat().st_size
                 await status_msg.edit_text(f"✅ Image processed successfully! New size: {_format_file_size(size_bytes)}")
             else:

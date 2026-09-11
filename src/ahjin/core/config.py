@@ -37,6 +37,8 @@ class Settings(BaseSettings):
     ollama_enabled: bool = True
     ollama_timeout_seconds: float = 60.0
     ollama_embedding_model: str = "bge-m3:latest"
+    
+    groq_api_key: str | None = None
 
     model_config = SettingsConfigDict(
         env_file=".env",

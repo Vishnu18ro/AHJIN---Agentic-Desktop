@@ -18,6 +18,7 @@ from ahjin.models import ModelRouter, create_default_catalog
 from ahjin.providers.nvidia import NvidiaProvider
 from ahjin.providers.ollama import OllamaProvider
 from ahjin.providers.openrouter import OpenRouterProvider
+from ahjin.providers.groq import GroqProvider
 from ahjin.providers.registry import ProviderRegistry
 from ahjin.security import AllowAllPermissionGate
 from ahjin.tools import (
@@ -58,6 +59,10 @@ async def main() -> None:
     if settings.openrouter_api_key:
         registry.register(OpenRouterProvider())
         logger.info("OpenRouterProvider registered successfully.")
+
+    if settings.groq_api_key:
+        registry.register(GroqProvider())
+        logger.info("GroqProvider registered successfully.")
 
     ollama_provider: OllamaProvider | None = None
     if settings.ollama_enabled:

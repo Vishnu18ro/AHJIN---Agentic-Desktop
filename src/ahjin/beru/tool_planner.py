@@ -149,6 +149,24 @@ class ToolIntentPlanner:
                 ),
             )
             raw_content = result.response.content.strip()
+            
+            print("\n" + "="*50)
+            print(f"MODEL USED :- {result.response.model_id}")
+            print(f"OUTPUT     :- \n{raw_content}")
+            print("="*50 + "\n")
+            
+            logger.info("ToolIntentPlanner: Checking if output is valid JSON...")
+            
+            # Clean possible reasoning tags (like <think>...</think>) from reasoning models
+            import re
+            raw_content = re.sub(r'<think>.*?</think>', '', raw_content, flags=re.DOTALL).strip()
+            
+            # Extract JSON block robustly
+            start_idx = raw_content.find('{')
+            end_idx = raw_content.rfind('}')
+            if start_idx != -1 and end_idx != -1:
+                raw_content = raw_content[start_idx:end_idx+1]
+            
             # Clean possible markdown code fences if model included them
             if raw_content.startswith("```"):
                 lines = raw_content.splitlines()

@@ -50,6 +50,26 @@ def create_default_catalog() -> ModelCatalog:
     catalog = ModelCatalog()
 
     # 1. FAST EXECUTION TIER Candidate (Verified Active Endpoint)
+    
+    # Priority #0: Groq Qwen (For Testing JSON Output)
+    catalog.register(
+        ModelDescriptor(
+            model_id="qwen/qwen3.6-27b",
+            provider_id="groq",
+            tier=ModelTier.FAST,
+            capabilities=ModelCapabilities(
+                reasoning=True,
+                coding=True,
+                vision=False,
+                tool_calling=True,
+                long_context=False,
+            ),
+            limits=ModelLimits(max_context_tokens=8192, max_output_tokens=4096),
+            priority=300,
+            quality_score=95,
+            endpoint_verified=True,
+        )
+    )
     catalog.register(
         ModelDescriptor(
             model_id="nvidia/nemotron-3.5-lightning-30b-a3b",
