@@ -18,6 +18,7 @@ from ahjin.providers.types import (
     FinishReason,
     ModelInvocationRequest,
     ModelInvocationResponse,
+    StreamChunk,
     TokenUsage,
 )
 from ahjin.telemetry.timing import (
@@ -99,6 +100,7 @@ class NvidiaProvider(BaseModelProvider):
         if self._client is not None and not self._client.is_closed:
             try:
                 import asyncio
+
                 loop = asyncio.get_event_loop()
                 if loop.is_running():
                     asyncio.create_task(self._client.aclose())
@@ -187,9 +189,7 @@ class NvidiaProvider(BaseModelProvider):
         # Map NVIDIA's raw finish_reason to AHJIN's canonical FinishReason.
         # NVIDIA returns: 'stop' (natural end), 'length' (max_tokens hit), others.
         # Previously hardcoded to COMPLETE — this masked truncation events.
-        raw_finish_reason: str = (
-            choices[0].get("finish_reason") or "stop"
-        ) if choices else "stop"
+        raw_finish_reason: str = (choices[0].get("finish_reason") or "stop") if choices else "stop"
         if raw_finish_reason == "length":
             finish_reason = FinishReason.MAX_TOKENS
         elif raw_finish_reason in ("stop", "eos"):
@@ -227,9 +227,7 @@ class NvidiaProvider(BaseModelProvider):
             model_id=str(payload["model"]),
         )
 
-    async def invoke_stream(
-        self, request: ModelInvocationRequest
-    ) -> AsyncGenerator[str, None]:
+    async def invoke_stream(self, request: ModelInvocationRequest) -> AsyncGenerator[str, None]:
         """Invoke NVIDIA API with stream=True, reusing persistent HTTP client."""
         messages: list[dict[str, str]] = []
         if request.prompt.system_instruction:
@@ -290,12 +288,14 @@ class NvidiaProvider(BaseModelProvider):
                             delta = choices[0].get("delta", {})
 
                             # Telemetry: Record reasoning phase arrival
-                            # CRITICAL: NEVER yield reasoning_content to stream or user!
+                            # CRITICAL: NEVER yield reasoning text to user or JSON parser!
+                            # Yield empty StreamChunk for watchdog progress tracking.
                             reasoning_chunk = delta.get("reasoning_content")
                             if reasoning_chunk:
                                 if t_first_reasoning is None:
                                     t_first_reasoning = time.perf_counter()
                                 reasoning_chunks_count += 1
+                                yield StreamChunk("", is_progress=True, is_reasoning=True)
 
                             # Stream delivery: Yield visible content chunks immediately
                             content = delta.get("content")
@@ -303,7 +303,7 @@ class NvidiaProvider(BaseModelProvider):
                                 if t_first_visible is None:
                                     t_first_visible = time.perf_counter()
                                 visible_chunks_count += 1
-                                yield content
+                                yield StreamChunk(content, is_progress=True, is_reasoning=False)
                     except json.JSONDecodeError:
                         continue
 
@@ -351,4 +351,3 @@ class NvidiaProvider(BaseModelProvider):
             reasoning_chunks=reasoning_chunks_count,
             visible_chunks=visible_chunks_count,
         )
-

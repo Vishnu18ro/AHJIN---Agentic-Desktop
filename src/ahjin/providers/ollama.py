@@ -17,6 +17,7 @@ from ahjin.providers.types import (
     FinishReason,
     ModelInvocationRequest,
     ModelInvocationResponse,
+    StreamChunk,
     TokenUsage,
 )
 
@@ -110,9 +111,7 @@ class OllamaProvider(BaseModelProvider):
                 "Ensure local model is pulled and running."
             )
 
-        raw_finish_reason: str = (
-            choices[0].get("finish_reason") or "stop"
-        ) if choices else "stop"
+        raw_finish_reason: str = (choices[0].get("finish_reason") or "stop") if choices else "stop"
         if raw_finish_reason == "length":
             finish_reason = FinishReason.MAX_TOKENS
         elif raw_finish_reason in ("stop", "eos"):
@@ -143,9 +142,7 @@ class OllamaProvider(BaseModelProvider):
             model_id=str(payload["model"]),
         )
 
-    async def invoke_stream(
-        self, request: ModelInvocationRequest
-    ) -> AsyncGenerator[str, None]:
+    async def invoke_stream(self, request: ModelInvocationRequest) -> AsyncGenerator[str, None]:
         """Invoke Ollama API with stream=True and yield text chunks."""
         import json
 
@@ -188,8 +185,11 @@ class OllamaProvider(BaseModelProvider):
                             choices = data_json.get("choices", [])
                             if choices:
                                 delta = choices[0].get("delta", {})
+                                reasoning_chunk = delta.get("reasoning_content")
+                                if reasoning_chunk:
+                                    yield StreamChunk("", is_progress=True, is_reasoning=True)
                                 content = delta.get("content")
                                 if content:
-                                    yield content
+                                    yield StreamChunk(content, is_progress=True, is_reasoning=False)
                         except json.JSONDecodeError:
                             continue

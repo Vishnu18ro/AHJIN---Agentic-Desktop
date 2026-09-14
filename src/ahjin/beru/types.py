@@ -6,6 +6,7 @@ from uuid import UUID, uuid4
 
 from pydantic import BaseModel, Field
 
+from ahjin.core.types import RerouteAttempt
 from ahjin.tools.base import ToolInvocationRequest
 
 
@@ -79,3 +80,4 @@ class ExecutionPlan(BaseModel):
     planner_failed_model: str | None = None
     planner_failure_reason: str | None = None
     planner_selected_model: str | None = None
+    planner_attempts: list[RerouteAttempt] = Field(default_factory=list)  # pyright: ignore[reportUnknownVariableType]

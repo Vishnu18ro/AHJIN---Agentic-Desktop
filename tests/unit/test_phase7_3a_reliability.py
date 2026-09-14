@@ -162,14 +162,14 @@ async def test_orchestrator_rejects_unsafe_out_of_root_path():
 
 
 # ===========================================================================
-# TEST E: planner configuration must be exactly 15.0 seconds
+# TEST E: planner configuration must be exactly 30.0 seconds (Harness-aligned)
 # ===========================================================================
-def test_planner_configuration_is_exactly_15_seconds():
-    assert settings.tool_planner_timeout == 15.0
-    assert DEFAULT_PLANNER_TIMEOUT_SECONDS == 15.0
+def test_planner_configuration_is_exactly_30_seconds():
+    assert settings.tool_planner_timeout == 30.0
+    assert DEFAULT_PLANNER_TIMEOUT_SECONDS == 30.0
 
     planner = ToolIntentPlanner()
-    assert planner.planner_timeout == 15.0
+    assert planner.planner_timeout == 30.0
 
 
 # ===========================================================================

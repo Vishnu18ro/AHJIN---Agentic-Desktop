@@ -53,6 +53,7 @@ class ProviderGateway:
     ) -> None:
         self.registry = registry or ProviderRegistry()
         self.router = router or ModelRouter()
+        self.last_selection: ModelSelectionResult | None = None
 
     async def invoke(
         self,
@@ -73,9 +74,8 @@ class ProviderGateway:
             excluded_models=list(excluded_model_ids or []),
         )
 
-        selection = self.router.select_model(
-            requirements, excluded_model_ids=excluded_model_ids
-        )
+        selection = self.router.select_model(requirements, excluded_model_ids=excluded_model_ids)
+        self.last_selection = selection
 
         model_id = selection.model_id
         max_tokens = selection.max_output_tokens
@@ -112,9 +112,8 @@ class ProviderGateway:
         excluded_model_ids: set[str] | None = None,
     ) -> AsyncGenerator[tuple[str, ModelSelectionResult], None]:
         """Resolve provider and model via ModelRouter and yield text chunks."""
-        selection = self.router.select_model(
-            requirements, excluded_model_ids=excluded_model_ids
-        )
+        selection = self.router.select_model(requirements, excluded_model_ids=excluded_model_ids)
+        self.last_selection = selection
         model_id = selection.model_id
         max_tokens = selection.max_output_tokens
 

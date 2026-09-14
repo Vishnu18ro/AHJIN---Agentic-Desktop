@@ -39,8 +39,15 @@ class Settings(BaseSettings):
     ollama_embedding_model: str = "bge-m3:latest"
 
     # Tool Intent Planner
-    # Default 15.0s bounded timeout accommodates OpenRouter latency while preventing stalls.
-    tool_planner_timeout: float = 15.0
+    # Default 30.0s inactivity watchdog, matching Harness startup semantics.
+    # 30s accommodates OpenRouter free-tier queueing (8–25s TTFT) and NVIDIA cold-start
+    # (5–30s TTFT) that the previous 15s threshold was prematurely killing.
+    # This is a per-candidate INACTIVITY timeout, not a total planning deadline.
+    tool_planner_timeout: float = 30.0
+
+    # Harness Provider Startup Timeout
+    # Default 30.0s per-candidate pre-response activity watchdog.
+    harness_startup_timeout_seconds: float = 30.0
 
     model_config = SettingsConfigDict(
         env_file=".env",

@@ -10,7 +10,7 @@ from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandl
 
 from ahjin.core.config import settings
 from ahjin.core.dispatcher import TaskDispatcher
-from ahjin.core.types import RuntimeInfo
+from ahjin.core.types import RerouteAttempt, RuntimeInfo
 from ahjin.interfaces.base import BaseInterfaceAdapter
 from ahjin.interfaces.telegram.mapper import TelegramMapper
 from ahjin.models.health import ModelHealthStatus
@@ -93,8 +93,78 @@ def _model_short_name(model_id: str) -> str:
         "deepseek-ai/deepseek-v4-pro-0813": "DeepSeek V4 Pro",
         "deepseek-ai/deepseek-v4-flash-0731": "DeepSeek V4 Flash",
         "moonshotai/kimi-k3": "Kimi K3",
+        "gemma3:4b": "Gemma 3 4B",
+        "ollama/gemma3:4b": "Gemma 3 4B",
+        "qwen3:8b": "Qwen 3 8B",
+        "ollama/qwen3:8b": "Qwen 3 8B",
     }
     return label_map.get(model_id, model_id.split("/")[-1])
+
+
+def _format_failure_reason(reason: str | None) -> str:
+    """Format failure reason compactly for chronological attempt chain."""
+    if not reason:
+        return ""
+    r = reason.strip()
+    if r.lower().startswith("http_"):
+        code_part = r[5:].strip()
+        if code_part.isdigit():
+            return code_part
+    if r.upper().startswith("HTTP "):
+        code_part = r[5:].strip()
+        if code_part.isdigit():
+            return code_part
+    if r.isdigit():
+        return r
+    if r in ("inactivity_timeout", "timeout", "startup_timeout", "qwen_timeout"):
+        return "timeout"
+    label_map = {
+        "empty_response": "empty response",
+        "invalid_json": "invalid JSON",
+        "unregistered_tool": "unregistered tool",
+        "invalid_params": "invalid params",
+    }
+    return label_map.get(r, r)
+
+
+def _format_reroute_chain(
+    component_name: str,
+    attempts: list[RerouteAttempt],
+    fallback_model: str | None = None,
+    fallback_target: str | None = None,
+    fallback_reason: str | None = None,
+) -> str | None:
+    """Format a chronological rerouting attempt chain for a component (Planner or Harness).
+
+    Displays:
+    {component_name}: {model_1} ❌ {reason} → {model_2} ❌ {reason} → {final_model} ✅
+    """
+    valid_attempts = [
+        att for att in attempts
+        if att.model_id and att.model_id != "unknown"
+    ]
+    if valid_attempts:
+        items: list[str] = []
+        for att in valid_attempts:
+            name = _model_short_name(att.model_id)
+            if att.success:
+                items.append(f"{name} ✅")
+            else:
+                reason_label = _format_failure_reason(att.reason)
+                items.append(f"{name} ❌ {reason_label}" if reason_label else f"{name} ❌")
+        if items:
+            return f"{component_name}: {' → '.join(items)}"
+
+    if fallback_model:
+        from_name = _model_short_name(fallback_model)
+        reason_label = _format_failure_reason(fallback_reason)
+        from_item = f"{from_name} ❌ {reason_label}" if reason_label else f"{from_name} ❌"
+        if fallback_target:
+            to_name = _model_short_name(fallback_target)
+            return f"{component_name}: {from_item} → {to_name} ✅"
+        return f"{component_name}: {from_item}"
+
+    return None
 
 
 TOOL_DISPLAY_MAP: dict[str, str] = {
@@ -184,6 +254,7 @@ def _build_runtime_footer(info: RuntimeInfo) -> str:
             )
 
         telegram_ms = timing.get(STAGE_TELEGRAM_DELIVERY, 0.0)
+        tool_llm_ms = timing.get(STAGE_TOOL_PLANNER, 0.0)
     else:
         ahjin_ms = info.ahjin_internal_ms
         provider_ms = info.provider_api_ms
@@ -191,6 +262,7 @@ def _build_runtime_footer(info: RuntimeInfo) -> str:
         if provider_ms > 0 or info.provider_api_ms > 0:
             has_provider_timing = True
         telegram_ms = 0.0
+        tool_llm_ms = 0.0
 
     # Sum explicit per-tool durations for "other" budget calculation
     tool_timings = info.tool_timings
@@ -199,6 +271,8 @@ def _build_runtime_footer(info: RuntimeInfo) -> str:
     )
 
     lines.append(f"├─ AHJIN: {int(round(ahjin_ms))}ms")
+    if tool_llm_ms > 0:
+        lines.append(f"├─ Tool LLM: {int(round(tool_llm_ms))}ms")
     if has_provider_timing and provider_ms > 0:
         lines.append(f"├─ Provider: {int(round(provider_ms))}ms")
 
@@ -230,6 +304,7 @@ def _build_runtime_footer(info: RuntimeInfo) -> str:
         other_ms = (
             info.total_ms
             - ahjin_ms
+            - tool_llm_ms
             - effective_provider_ms
             - total_tool_ms
             - model_ms
@@ -248,21 +323,33 @@ def _build_runtime_footer(info: RuntimeInfo) -> str:
         reason = info.failure_reason or info.harness_failure_reason or info.planner_failure_reason
 
         # Case 2 or Case 4: Planner rerouted
-        if info.planner_was_rerouted and info.planner_failed_model:
+        if info.planner_was_rerouted:
             planner_target = (
                 info.planner_selected_model
                 or (info.planner_route_history[-1] if info.planner_route_history else None)
                 or info.selected_model
             )
-            p_from = _model_short_name(info.planner_failed_model)
-            p_to = _model_short_name(planner_target)
-            lines.append(f"Planner: {p_from} → {p_to}")
+            p_chain = _format_reroute_chain(
+                "Planner",
+                attempts=info.planner_attempts,
+                fallback_model=info.planner_failed_model,
+                fallback_target=planner_target,
+                fallback_reason=info.planner_failure_reason,
+            )
+            if p_chain:
+                lines.append(p_chain)
 
         # Case 3 or Case 4: Harness rerouted
-        if info.harness_was_rerouted and info.harness_failed_model:
-            h_from = _model_short_name(info.harness_failed_model)
-            h_to = _model_short_name(info.selected_model)
-            lines.append(f"Harness: {h_from} → {h_to}")
+        if info.harness_was_rerouted:
+            h_chain = _format_reroute_chain(
+                "Harness",
+                attempts=info.harness_attempts,
+                fallback_model=info.harness_failed_model,
+                fallback_target=info.selected_model,
+                fallback_reason=info.harness_failure_reason,
+            )
+            if h_chain:
+                lines.append(h_chain)
         elif info.planner_was_rerouted and not info.harness_was_rerouted:
             lines.append(
                 f"Harness: {_model_short_name(info.selected_model)}"

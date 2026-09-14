@@ -45,6 +45,7 @@ from ahjin.telemetry.timing import (
 
 # --- 1. Objective B: Connection Reuse & Cleanup ---
 
+
 @pytest.mark.asyncio
 async def test_nvidia_provider_connection_reuse() -> None:
     """NvidiaProvider reuses a single persistent httpx.AsyncClient across invocations."""
@@ -87,18 +88,19 @@ async def test_nvidia_provider_aclose_and_reopen() -> None:
 
 # --- 2. Objective A: Reasoning Interception & Progressive Streaming ---
 
+
 @pytest.mark.asyncio
 async def test_nvidia_streaming_discards_reasoning_and_yields_visible_content() -> None:
     """Reasoning chunks are captured for telemetry but NEVER yielded to stream."""
     provider = NvidiaProvider(api_key="test-key")
 
     mock_lines = [
-        ': keep-alive\n',
+        ": keep-alive\n",
         'data: {"choices": [{"delta": {"reasoning_content": "Thinking step 1"}}]}\n',
         'data: {"choices": [{"delta": {"reasoning_content": "Thinking step 2"}}]}\n',
         'data: {"choices": [{"delta": {"content": "Hello"}}]}\n',
         'data: {"choices": [{"delta": {"content": " world!"}}]}\n',
-        'data: [DONE]\n',
+        "data: [DONE]\n",
     ]
 
     async def mock_aiter_lines() -> AsyncGenerator[str, None]:
@@ -129,8 +131,9 @@ async def test_nvidia_streaming_discards_reasoning_and_yields_visible_content() 
     async for chunk in provider.invoke_stream(req):
         yielded_chunks.append(chunk)
 
-    # CRITICAL: Only visible content is yielded
-    assert yielded_chunks == ["Hello", " world!"]
+    # CRITICAL: Only visible content is yielded (reasoning chunks are empty StreamChunks)
+    assert [c for c in yielded_chunks if c] == ["Hello", " world!"]
+    assert all(getattr(c, "is_reasoning", False) for c in yielded_chunks if not c)
 
     # Telemetry was populated internally
     tel = provider.last_telemetry
@@ -149,6 +152,7 @@ async def test_nvidia_streaming_discards_reasoning_and_yields_visible_content() 
 
 # --- 3. Objective C: Intermediate File-Search Context Reduction ---
 
+
 def test_context_assembler_prunes_search_when_read_succeeded() -> None:
     """When file_read succeeded, raw multi-file search dump is condensed in prompt."""
     assembler = ContextAssembler()
@@ -162,12 +166,10 @@ def test_context_assembler_prunes_search_when_read_succeeded() -> None:
         "- [FILE/PATH MATCH] old_resume.doc (Full path: /path/to/old_resume.doc)\n"
         "\n[PROJECT SOURCE & TEST CODE]\n"
         "- [FILE/PATH MATCH] tests/test_resume.py\n"
-        "- [CONTENT MATCH] src/ahjin/tools.py:L10: resume parser\n"
-        * 10
+        "- [CONTENT MATCH] src/ahjin/tools.py:L10: resume parser\n" * 10
     )
     read_output = (
-        "--- Content of resume.pdf (Size: 12.3 KB) ---\n"
-        "[Page 1]\nJohn Doe Resume\nExperience..."
+        "--- Content of resume.pdf (Size: 12.3 KB) ---\n[Page 1]\nJohn Doe Resume\nExperience..."
     )
 
     prior_results = [
@@ -241,6 +243,7 @@ def test_context_assembler_preserves_search_when_read_failed_or_absent() -> None
 
 
 # --- 4. Objective A & Telegram Footer Preservation ---
+
 
 def test_internal_telemetry_does_not_mutate_compact_footer() -> None:
     """Internal granular stages do not appear in the compact Telegram footer."""

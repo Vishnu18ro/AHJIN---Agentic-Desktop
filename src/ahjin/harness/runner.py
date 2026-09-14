@@ -26,8 +26,9 @@ from ahjin.beru.types import (
     RecoveryPolicy,
     StepType,
 )
+from ahjin.core.config import settings
 from ahjin.core.errors import AhjinError, ErrorCategory
-from ahjin.core.types import RuntimeInfo, TaskContext, TaskResult
+from ahjin.core.types import RerouteAttempt, RuntimeInfo, TaskContext, TaskResult
 from ahjin.harness.connectivity import ConnectivityChecker
 from ahjin.harness.context import ContextAssembler
 from ahjin.harness.gateway import ProviderGateway
@@ -35,7 +36,7 @@ from ahjin.harness.state import ExecutionState, StepResult
 from ahjin.harness.verifier import ResponseVerifier, VerificationError
 from ahjin.local.executor import LocalExecutor
 from ahjin.local.types import LocalExecutionError, LocalExecutionResult, LocalRoutingSkipped
-from ahjin.models.router import CapabilityUnavailableError
+from ahjin.models.router import CapabilityUnavailableError, ModelSelectionResult
 from ahjin.security.gate import PermissionGate
 from ahjin.telemetry import (
     STAGE_CONTEXT_ASSEMBLY,
@@ -64,9 +65,7 @@ def _extract_tool_metadata(
         timer.get_tool_timings()
         if timer is not None and timer.get_tool_timings()
         else [
-            (s.tool_name, s.tool_duration_ms)
-            for s in state_step_results
-            if s.tool_name is not None
+            (s.tool_name, s.tool_duration_ms) for s in state_step_results if s.tool_name is not None
         ]
     )
     names = [t[0] for t in timings]
@@ -85,6 +84,7 @@ class HarnessRunner:
         connectivity_checker: ConnectivityChecker | None = None,
         tool_registry: ToolRegistry | None = None,
         permission_gate: PermissionGate | None = None,
+        startup_timeout: float | None = None,
     ) -> None:
         self.context_assembler = context_assembler or ContextAssembler()
         self.gateway = gateway or ProviderGateway()
@@ -95,6 +95,11 @@ class HarnessRunner:
         self.connectivity_checker = connectivity_checker or ConnectivityChecker()
         self.tool_registry = tool_registry
         self.permission_gate = permission_gate
+        self.startup_timeout: float = (
+            startup_timeout
+            if startup_timeout is not None
+            else settings.harness_startup_timeout_seconds
+        )
 
     async def run(
         self,
@@ -158,9 +163,7 @@ class HarnessRunner:
                     last_output = ambig_res.output_text
                     state.step_results.append(step_res)
 
-                    tool_timings, executed_tools = _extract_tool_metadata(
-                        state.step_results, timer
-                    )
+                    tool_timings, executed_tools = _extract_tool_metadata(state.step_results, timer)
                     total_tool_ms = sum(t[1] for t in tool_timings) if tool_timings else 0.0
                     runtime_info = RuntimeInfo(
                         selected_model="deterministic",
@@ -180,7 +183,8 @@ class HarnessRunner:
 
                 if has_file_send and not requires_reasoning:
                     send_res = next(
-                        r for r in reversed(prior_successful_tools)
+                        r
+                        for r in reversed(prior_successful_tools)
                         if r.tool_name == "file_send" or r.attachment_paths
                     )
                     att_names = [p.name for p in send_res.attachment_paths]
@@ -199,9 +203,7 @@ class HarnessRunner:
                     last_output = confirm_text
                     state.step_results.append(step_res)
 
-                    tool_timings, executed_tools = _extract_tool_metadata(
-                        state.step_results, timer
-                    )
+                    tool_timings, executed_tools = _extract_tool_metadata(state.step_results, timer)
                     total_tool_ms = sum(t[1] for t in tool_timings) if tool_timings else 0.0
                     runtime_info = RuntimeInfo(
                         selected_model="deterministic",
@@ -221,6 +223,7 @@ class HarnessRunner:
                         planner_failed_model=plan.planner_failed_model,
                         planner_failure_reason=plan.planner_failure_reason,
                         planner_selected_model=plan.planner_selected_model,
+                        planner_attempts=plan.planner_attempts,
                         health_status="HEALTHY",
                     )
                     continue
@@ -253,6 +256,7 @@ class HarnessRunner:
 
                 excluded_models: set[str] = set()
                 harness_attempted_models: list[str] = []
+                harness_attempts: list[RerouteAttempt] = []
                 attempts = 0
                 step_success = False
 
@@ -307,8 +311,8 @@ class HarnessRunner:
                                     prov = self.gateway.registry.get_provider(prov_id)
                                     last_tel: Any = getattr(prov, "last_telemetry", None)
                                     if isinstance(last_tel, dict):
-                                        tel_dict: dict[str, float] = (
-                                            cast(dict[str, float], last_tel)
+                                        tel_dict: dict[str, float] = cast(
+                                            dict[str, float], last_tel
                                         )
                                         for stage_k, stage_v in tel_dict.items():
                                             timer.record(str(stage_k), float(stage_v))
@@ -345,6 +349,14 @@ class HarnessRunner:
                             last_output = response.content
                             step_success = True
                             state.step_results.append(step_res)
+                            harness_attempts.append(
+                                RerouteAttempt(
+                                    model_id=response.model_id,
+                                    success=True,
+                                    provider_id=selection.provider_id,
+                                    elapsed_ms=response.latency_ms,
+                                )
+                            )
 
                             step_total_ms = (time.monotonic() - step_t0) * 1000.0
                             ahjin_overhead_ms = step_total_ms - response.latency_ms
@@ -354,7 +366,7 @@ class HarnessRunner:
                             tool_timings, executed_tools = _extract_tool_metadata(
                                 state.step_results, timer
                             )
-                            harness_was_rerouted = (first_failed_model is not None)
+                            harness_was_rerouted = first_failed_model is not None
                             whole_request_rerouted = (
                                 plan.planner_was_rerouted or harness_was_rerouted
                             )
@@ -376,10 +388,12 @@ class HarnessRunner:
                                 planner_failed_model=plan.planner_failed_model,
                                 planner_failure_reason=plan.planner_failure_reason,
                                 planner_selected_model=plan.planner_selected_model,
+                                planner_attempts=plan.planner_attempts,
                                 harness_was_rerouted=harness_was_rerouted,
                                 harness_route_history=harness_attempted_models,
                                 harness_failed_model=first_failed_model,
                                 harness_failure_reason=first_failure_reason,
+                                harness_attempts=harness_attempts,
                                 health_status=health_state.snapshot_status.value,
                             )
 
@@ -399,9 +413,17 @@ class HarnessRunner:
                                 excluded_models.add(str(failed_model))
                                 if str(failed_model) not in harness_attempted_models:
                                     harness_attempted_models.append(str(failed_model))
+                                reason = _classify_failure_reason(exc)
+                                harness_attempts.append(
+                                    RerouteAttempt(
+                                        model_id=str(failed_model),
+                                        success=False,
+                                        reason=reason,
+                                    )
+                                )
                                 if first_failed_model is None:
                                     first_failed_model = str(failed_model)
-                                    first_failure_reason = _classify_failure_reason(exc)
+                                    first_failure_reason = reason
 
                             logger.warning(
                                 "[PROFILE] Model invocation failed — checking recovery",
@@ -415,9 +437,8 @@ class HarnessRunner:
                             if recovery_policy == RecoveryPolicy.FAIL_FAST:
                                 break
 
-                            if (
-                                attempts >= max_attempts
-                                or isinstance(exc, CapabilityUnavailableError)
+                            if attempts >= max_attempts or isinstance(
+                                exc, CapabilityUnavailableError
                             ):
                                 break
 
@@ -430,23 +451,50 @@ class HarnessRunner:
                             strategy=strategy,
                         )
                         step_total_ms = local_result.latency_ms
+                        if local_result.used_fallback:
+                            if local_result.attempted_model:
+                                if local_result.attempted_model not in harness_attempted_models:
+                                    harness_attempted_models.append(local_result.attempted_model)
+                                harness_attempts.append(
+                                    RerouteAttempt(
+                                        model_id=local_result.attempted_model,
+                                        success=False,
+                                        reason=local_result.fallback_reason or "timeout",
+                                        provider_id="ollama",
+                                    )
+                                )
+                            if local_result.model_used not in harness_attempted_models:
+                                harness_attempted_models.append(local_result.model_used)
+                            harness_attempts.append(
+                                RerouteAttempt(
+                                    model_id=local_result.model_used,
+                                    success=True,
+                                    provider_id="ollama",
+                                    elapsed_ms=local_result.latency_ms,
+                                )
+                            )
+                        else:
+                            if local_result.model_used not in harness_attempted_models:
+                                harness_attempted_models.append(local_result.model_used)
+                            harness_attempts.append(
+                                RerouteAttempt(
+                                    model_id=local_result.model_used,
+                                    success=True,
+                                    provider_id="ollama",
+                                    elapsed_ms=local_result.latency_ms,
+                                )
+                            )
+
                         tool_timings, executed_tools = _extract_tool_metadata(
                             state.step_results, timer
                         )
-                        harness_was_rerouted = (
-                            local_result.used_fallback
-                            or (first_failed_model is not None)
+                        harness_was_rerouted = local_result.used_fallback or (
+                            first_failed_model is not None
                         )
-                        whole_request_rerouted = (
-                            plan.planner_was_rerouted or harness_was_rerouted
-                        )
+                        whole_request_rerouted = plan.planner_was_rerouted or harness_was_rerouted
                         runtime_info = RuntimeInfo(
                             selected_model=local_result.model_used,
-                            tier=(
-                                "FAST"
-                                if local_result.model_used == "gemma3:4b"
-                                else "HEAVY"
-                            ),
+                            tier=("FAST" if local_result.model_used == "gemma3:4b" else "HEAVY"),
                             provider_id="ollama",
                             ahjin_internal_ms=0.0,
                             provider_api_ms=round(local_result.latency_ms, 1),
@@ -455,10 +503,10 @@ class HarnessRunner:
                             tool_timings=tool_timings,
                             executed_tools=executed_tools,
                             was_rerouted=whole_request_rerouted,
-                            failed_model=first_failed_model or plan.planner_failed_model or (
-                                local_result.attempted_model
-                                if local_result.used_fallback
-                                else None
+                            failed_model=first_failed_model
+                            or plan.planner_failed_model
+                            or (
+                                local_result.attempted_model if local_result.used_fallback else None
                             ),
                             failure_reason=(
                                 first_failure_reason
@@ -470,10 +518,12 @@ class HarnessRunner:
                             planner_failed_model=plan.planner_failed_model,
                             planner_failure_reason=plan.planner_failure_reason,
                             planner_selected_model=plan.planner_selected_model,
+                            planner_attempts=plan.planner_attempts,
                             harness_was_rerouted=harness_was_rerouted,
                             harness_route_history=harness_attempted_models,
                             harness_failed_model=first_failed_model,
                             harness_failure_reason=first_failure_reason,
+                            harness_attempts=harness_attempts,
                             health_status="LOCAL",
                         )
                         if local_result.suggest_escalation:
@@ -535,12 +585,9 @@ class HarnessRunner:
                     )
                     if prior_search is not None and tool_name in ("file_send", "file_read"):
                         if prior_search.is_ambiguous:
-                            ambig_msg = (
-                                prior_search.output_text
-                                or (
-                                    "Multiple matching files found. "
-                                    "Please specify which file you would like."
-                                )
+                            ambig_msg = prior_search.output_text or (
+                                "Multiple matching files found. "
+                                "Please specify which file you would like."
                             )
                             step_res = StepResult(
                                 step_id=step.step_id,
@@ -668,9 +715,7 @@ class HarnessRunner:
                     last_output = ambig_res.output_text
                     state.step_results.append(step_res)
 
-                    tool_timings, executed_tools = _extract_tool_metadata(
-                        state.step_results, timer
-                    )
+                    tool_timings, executed_tools = _extract_tool_metadata(state.step_results, timer)
                     total_tool_ms = sum(t[1] for t in tool_timings) if tool_timings else 0.0
                     runtime_info = RuntimeInfo(
                         selected_model="deterministic",
@@ -690,7 +735,8 @@ class HarnessRunner:
 
                 if has_file_send and not requires_reasoning:
                     send_res = next(
-                        r for r in reversed(prior_successful_tools)
+                        r
+                        for r in reversed(prior_successful_tools)
                         if r.tool_name == "file_send" or r.attachment_paths
                     )
                     att_names = [p.name for p in send_res.attachment_paths]
@@ -711,9 +757,7 @@ class HarnessRunner:
                     last_output = confirm_text
                     state.step_results.append(step_res)
 
-                    tool_timings, executed_tools = _extract_tool_metadata(
-                        state.step_results, timer
-                    )
+                    tool_timings, executed_tools = _extract_tool_metadata(state.step_results, timer)
                     total_tool_ms = sum(t[1] for t in tool_timings) if tool_timings else 0.0
                     runtime_info = RuntimeInfo(
                         selected_model="deterministic",
@@ -733,6 +777,7 @@ class HarnessRunner:
                         planner_failed_model=plan.planner_failed_model,
                         planner_failure_reason=plan.planner_failure_reason,
                         planner_selected_model=plan.planner_selected_model,
+                        planner_attempts=plan.planner_attempts,
                         health_status="HEALTHY",
                     )
                     continue
@@ -757,12 +802,14 @@ class HarnessRunner:
 
                 excluded_models: set[str] = set()
                 harness_attempted_models: list[str] = []
+                harness_attempts: list[RerouteAttempt] = []
                 attempts = 0
                 step_success = False
 
                 first_failed_model: str | None = None
                 first_failure_reason: str | None = None
                 cloud_error: Exception | None = None
+                last_selection: ModelSelectionResult | None = None
                 step_t0 = time.monotonic()
 
                 is_online = self.connectivity_checker.is_online()
@@ -777,33 +824,75 @@ class HarnessRunner:
                             first_token = True
                             t0_first_token: float = t0_stream  # wall-clock when stream call starts
 
-                            async for chunk, selection in self.gateway.invoke_stream(
+                            stream = self.gateway.invoke_stream(
                                 prompt=prompt,
                                 requirements=strategy,
                                 excluded_model_ids=excluded_models,
-                            ):
-                                if first_token:
-                                    t_first_token = time.monotonic()
-                                    if timer is not None:
-                                        # model_routing: pure ModelRouter.select_model() time,
-                                        # already measured by the router; exposed on selection.
-                                        timer.record(
-                                            STAGE_MODEL_ROUTING,
-                                            selection.selection_time_ms,
+                            )
+                            stream_iter = aiter(stream)
+
+                            # ── 30s PER-CANDIDATE STARTUP WATCHDOG ───────────────
+                            # The 30s watchdog is ONLY an inactivity timeout for the
+                            # pre-response / provider startup phase.
+                            # Legitimate stream progress (content or reasoning) resets
+                            # the inactivity timer.
+                            # Once first visible content arrives, startup watchdog is satisfied
+                            # and the model generates naturally with NO completion deadline.
+                            t_startup_deadline = time.monotonic() + self.startup_timeout
+
+                            try:
+                                while first_token:
+                                    remaining = max(0.0, t_startup_deadline - time.monotonic())
+                                    if remaining <= 0.0:
+                                        raise asyncio.TimeoutError(
+                                            "Harness candidate provider startup timed out "
+                                            f"after {self.startup_timeout}s without progress"
                                         )
-                                        # time_to_first_token: wall time from invoke_stream()
-                                        # call until first content chunk arrives in the runner.
-                                        # Includes HTTP connection + provider_setup internally,
-                                        # but provider_setup cannot be exposed without modifying
-                                        # the provider — left SKIPPED in footer.
-                                        ttft_ms = (t_first_token - t0_first_token) * 1000.0
-                                        timer.record(STAGE_TIME_TO_FIRST_TOKEN, ttft_ms)
-                                    first_token = False
-                                last_selection = selection
-                                if selection.model_id not in harness_attempted_models:
-                                    harness_attempted_models.append(selection.model_id)
-                                accumulated_content.append(chunk)
-                                yield chunk, None
+                                    try:
+                                        chunk, selection = await asyncio.wait_for(
+                                            anext(stream_iter),
+                                            timeout=remaining,
+                                        )
+                                    except StopAsyncIteration:
+                                        break
+
+                                    last_selection = selection
+                                    if selection.model_id not in harness_attempted_models:
+                                        harness_attempted_models.append(selection.model_id)
+
+                                    is_reasoning = getattr(chunk, "is_reasoning", False)
+                                    is_progress = getattr(chunk, "is_progress", bool(chunk))
+                                    is_visible = bool(chunk)
+
+                                    if is_progress or is_reasoning:
+                                        t_startup_deadline = time.monotonic() + self.startup_timeout
+
+                                    if is_visible:
+                                        t_first_token = time.monotonic()
+                                        if timer is not None:
+                                            timer.record(
+                                                STAGE_MODEL_ROUTING,
+                                                selection.selection_time_ms,
+                                            )
+                                            ttft_ms = (t_first_token - t0_first_token) * 1000.0
+                                            timer.record(STAGE_TIME_TO_FIRST_TOKEN, ttft_ms)
+                                        first_token = False
+                                        accumulated_content.append(chunk)
+                                        yield chunk, None
+
+                                # ── NATURAL GENERATION (NO 30s LIMIT) ─────────────────
+                                async for chunk, selection in stream_iter:
+                                    last_selection = selection
+                                    if selection.model_id not in harness_attempted_models:
+                                        harness_attempted_models.append(selection.model_id)
+                                    if chunk:
+                                        accumulated_content.append(chunk)
+                                        yield chunk, None
+                            finally:
+                                try:
+                                    await stream.aclose()
+                                except Exception:
+                                    pass
 
                             full_response = "".join(accumulated_content)
                             t_stream_ms = (time.monotonic() - t0_stream) * 1000.0
@@ -822,8 +911,8 @@ class HarnessRunner:
                                         prov = self.gateway.registry.get_provider(prov_id)
                                         last_tel: Any = getattr(prov, "last_telemetry", None)
                                         if isinstance(last_tel, dict):
-                                            tel_dict: dict[str, float] = (
-                                                cast(dict[str, float], last_tel)
+                                            tel_dict: dict[str, float] = cast(
+                                                dict[str, float], last_tel
                                             )
                                             for stage_k, stage_v in tel_dict.items():
                                                 timer.record(str(stage_k), float(stage_v))
@@ -845,6 +934,16 @@ class HarnessRunner:
                             last_output = full_response
                             step_success = True
                             state.step_results.append(step_res)
+                            harness_attempts.append(
+                                RerouteAttempt(
+                                    model_id=last_selection.model_id if last_selection else "",
+                                    success=True,
+                                    provider_id=(
+                                        last_selection.provider_id if last_selection else None
+                                    ),
+                                    elapsed_ms=t_stream_ms,
+                                )
+                            )
 
                             step_total_ms = (time.monotonic() - step_t0) * 1000.0
                             if last_selection:
@@ -858,7 +957,7 @@ class HarnessRunner:
                                     timer.get(STAGE_TIME_TO_FIRST_TOKEN) if timer else 0.0
                                 )
                                 model_gen_ms = max(t_stream_ms - t_first_token_elapsed, 0.0)
-                                harness_was_rerouted = (first_failed_model is not None)
+                                harness_was_rerouted = first_failed_model is not None
                                 whole_request_rerouted = (
                                     plan.planner_was_rerouted or harness_was_rerouted
                                 )
@@ -873,9 +972,7 @@ class HarnessRunner:
                                     tool_timings=tool_timings,
                                     executed_tools=executed_tools,
                                     was_rerouted=whole_request_rerouted,
-                                    failed_model=(
-                                        first_failed_model or plan.planner_failed_model
-                                    ),
+                                    failed_model=(first_failed_model or plan.planner_failed_model),
                                     failure_reason=(
                                         first_failure_reason or plan.planner_failure_reason
                                     ),
@@ -884,10 +981,12 @@ class HarnessRunner:
                                     planner_failed_model=plan.planner_failed_model,
                                     planner_failure_reason=plan.planner_failure_reason,
                                     planner_selected_model=plan.planner_selected_model,
+                                    planner_attempts=plan.planner_attempts,
                                     harness_was_rerouted=harness_was_rerouted,
                                     harness_route_history=harness_attempted_models,
                                     harness_failed_model=first_failed_model,
                                     harness_failure_reason=first_failure_reason,
+                                    harness_attempts=harness_attempts,
                                     health_status=health_state.snapshot_status.value,
                                 )
 
@@ -900,23 +999,43 @@ class HarnessRunner:
                             VerificationError,
                             CapabilityUnavailableError,
                             KeyError,
+                            asyncio.TimeoutError,
                         ) as exc:
                             cloud_error = exc
                             failed_model = getattr(exc, "model_id", None)
+                            if not failed_model:
+                                candidate_sel = last_selection or getattr(
+                                    self.gateway, "last_selection", None
+                                )
+                                failed_model = candidate_sel.model_id if candidate_sel else None
                             if failed_model:
+                                if isinstance(exc, asyncio.TimeoutError):
+                                    if hasattr(self.gateway, "router") and hasattr(
+                                        self.gateway.router, "health_tracker"
+                                    ):
+                                        self.gateway.router.health_tracker.record_failure(
+                                            failed_model
+                                        )
                                 excluded_models.add(str(failed_model))
                                 if str(failed_model) not in harness_attempted_models:
                                     harness_attempted_models.append(str(failed_model))
+                                reason = _classify_failure_reason(exc)
+                                harness_attempts.append(
+                                    RerouteAttempt(
+                                        model_id=str(failed_model),
+                                        success=False,
+                                        reason=reason,
+                                    )
+                                )
                                 if first_failed_model is None:
                                     first_failed_model = str(failed_model)
-                                    first_failure_reason = _classify_failure_reason(exc)
+                                    first_failure_reason = reason
 
                             if recovery_policy == RecoveryPolicy.FAIL_FAST:
                                 break
 
-                            if (
-                                attempts >= max_attempts
-                                or isinstance(exc, CapabilityUnavailableError)
+                            if attempts >= max_attempts or isinstance(
+                                exc, CapabilityUnavailableError
                             ):
                                 break
 
@@ -933,12 +1052,46 @@ class HarnessRunner:
 
                         if last_local_result:
                             step_total_ms = last_local_result.latency_ms
+                            if last_local_result.used_fallback:
+                                if last_local_result.attempted_model:
+                                    att_m = last_local_result.attempted_model
+                                    if att_m not in harness_attempted_models:
+                                        harness_attempted_models.append(att_m)
+                                    harness_attempts.append(
+                                        RerouteAttempt(
+                                            model_id=att_m,
+                                            success=False,
+                                            reason=last_local_result.fallback_reason or "timeout",
+                                            provider_id="ollama",
+                                        )
+                                    )
+                                if last_local_result.model_used not in harness_attempted_models:
+                                    harness_attempted_models.append(last_local_result.model_used)
+                                harness_attempts.append(
+                                    RerouteAttempt(
+                                        model_id=last_local_result.model_used,
+                                        success=True,
+                                        provider_id="ollama",
+                                        elapsed_ms=last_local_result.latency_ms,
+                                    )
+                                )
+                            else:
+                                if last_local_result.model_used not in harness_attempted_models:
+                                    harness_attempted_models.append(last_local_result.model_used)
+                                harness_attempts.append(
+                                    RerouteAttempt(
+                                        model_id=last_local_result.model_used,
+                                        success=True,
+                                        provider_id="ollama",
+                                        elapsed_ms=last_local_result.latency_ms,
+                                    )
+                                )
+
                             tool_timings, executed_tools = _extract_tool_metadata(
                                 state.step_results, timer
                             )
-                            harness_was_rerouted = (
-                                last_local_result.used_fallback
-                                or (first_failed_model is not None)
+                            harness_was_rerouted = last_local_result.used_fallback or (
+                                first_failed_model is not None
                             )
                             whole_request_rerouted = (
                                 plan.planner_was_rerouted or harness_was_rerouted
@@ -958,7 +1111,9 @@ class HarnessRunner:
                                 tool_timings=tool_timings,
                                 executed_tools=executed_tools,
                                 was_rerouted=whole_request_rerouted,
-                                failed_model=first_failed_model or plan.planner_failed_model or (
+                                failed_model=first_failed_model
+                                or plan.planner_failed_model
+                                or (
                                     last_local_result.attempted_model
                                     if last_local_result.used_fallback
                                     else None
@@ -973,10 +1128,12 @@ class HarnessRunner:
                                 planner_failed_model=plan.planner_failed_model,
                                 planner_failure_reason=plan.planner_failure_reason,
                                 planner_selected_model=plan.planner_selected_model,
+                                planner_attempts=plan.planner_attempts,
                                 harness_was_rerouted=harness_was_rerouted,
                                 harness_route_history=harness_attempted_models,
                                 harness_failed_model=first_failed_model,
                                 harness_failure_reason=first_failure_reason,
+                                harness_attempts=harness_attempts,
                                 health_status="LOCAL",
                             )
                             if last_local_result.suggest_escalation:
@@ -1027,12 +1184,9 @@ class HarnessRunner:
                     )
                     if prior_search is not None and tool_name in ("file_send", "file_read"):
                         if prior_search.is_ambiguous:
-                            ambig_msg = (
-                                prior_search.output_text
-                                or (
-                                    "Multiple matching files found. "
-                                    "Please specify which file you would like."
-                                )
+                            ambig_msg = prior_search.output_text or (
+                                "Multiple matching files found. "
+                                "Please specify which file you would like."
                             )
                             step_res = StepResult(
                                 step_id=step.step_id,
@@ -1198,7 +1352,7 @@ def _classify_failure_reason(exc: Exception) -> str:
     Returns a human-readable string describing the actual cause.
     Never invents reasons — reports what the exception type indicates.
     """
-    if isinstance(exc, httpx.TimeoutException):
+    if isinstance(exc, (asyncio.TimeoutError, httpx.TimeoutException)):
         return "timeout"
     if isinstance(exc, httpx.HTTPStatusError):
         return f"HTTP {exc.response.status_code}"

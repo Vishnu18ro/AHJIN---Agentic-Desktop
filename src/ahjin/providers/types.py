@@ -63,3 +63,31 @@ class ModelInvocationResponse(BaseModel):
     provider_id: str
     model_id: str
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+
+
+class StreamChunk(str):
+    """String subclass representing a stream chunk, optionally carrying progress/event metadata.
+
+    Inherits from str so that all string methods, string checks (isinstance(chunk, str)),
+    concatenations, joins, and comparisons remain completely transparent and backward-compatible
+    with existing consumers and tests.
+
+    Attributes:
+        is_progress: True if chunk signals legitimate stream activity (resets watchdog).
+        is_reasoning: True if chunk signals internal reasoning (suppressed from user/JSON).
+    """
+
+    is_progress: bool = True
+    is_reasoning: bool = False
+
+    def __new__(
+        cls,
+        content: str = "",
+        *,
+        is_progress: bool = True,
+        is_reasoning: bool = False,
+    ) -> "StreamChunk":
+        instance = super().__new__(cls, content)
+        instance.is_progress = is_progress
+        instance.is_reasoning = is_reasoning
+        return instance

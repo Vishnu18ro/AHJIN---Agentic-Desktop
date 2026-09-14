@@ -5,7 +5,11 @@ from ahjin.providers.nvidia import NvidiaProvider
 from ahjin.providers.ollama import OllamaProvider
 from ahjin.providers.openrouter import OpenRouterProvider
 from ahjin.providers.registry import ProviderRegistry
-from ahjin.providers.types import ModelInvocationRequest, ModelInvocationResponse
+from ahjin.providers.types import (
+    ModelInvocationRequest,
+    ModelInvocationResponse,
+    StreamChunk,
+)
 
 __all__ = [
     "BaseModelProvider",
@@ -15,5 +19,5 @@ __all__ = [
     "ProviderRegistry",
     "ModelInvocationRequest",
     "ModelInvocationResponse",
+    "StreamChunk",
 ]
-

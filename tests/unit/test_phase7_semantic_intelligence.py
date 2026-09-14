@@ -576,7 +576,7 @@ class TestOrchestratorPlannerFailureContract:
         # Plan must NOT fall through to conversational chat
         assert len(plan.steps) == 1
         assert plan.steps[0].deterministic_output is not None
-        assert "⚠️ Tool intent planning was unable to process" in plan.steps[0].deterministic_output
+        assert "⚠️ AHJIN is currently experiencing" in plan.steps[0].deterministic_output
 
     @pytest.mark.asyncio
     async def test_runner_executes_deterministic_output_directly(self) -> None:
@@ -591,7 +591,7 @@ class TestOrchestratorPlannerFailureContract:
 
         assert result.success is True
         assert result.output_text is not None
-        assert "⚠️ Tool intent planning was unable to process" in result.output_text
+        assert "⚠️ AHJIN is currently experiencing" in result.output_text
         assert result.runtime_info is not None
         assert result.runtime_info.selected_model == "deterministic"
 

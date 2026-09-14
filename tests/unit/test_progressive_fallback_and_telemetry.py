@@ -19,6 +19,7 @@ from ahjin.beru.types import (
 )
 from ahjin.core.types import (
     RequestMetadata,
+    RerouteAttempt,
     RuntimeInfo,
     TaskContext,
     TaskRequest,
@@ -502,7 +503,7 @@ def test_telemetry_case_2_planner_reroutes() -> None:
     assert "Model: Nemotron 3.5 Lightning" in footer
     assert "Provider: OpenRouter" in footer
     assert "Path: ↪ Rerouted" in footer
-    assert "Planner: MiniMax M3 → Nemotron 3.5 Lightning" in footer
+    assert "Planner: MiniMax M3 ❌ 402 → Nemotron 3.5 Lightning ✅" in footer
     assert "Harness: Nemotron 3.5 Lightning" in footer
     assert "Reason: HTTP 402" in footer
 
@@ -524,7 +525,7 @@ def test_telemetry_case_3_harness_reroutes() -> None:
     assert "Model: Nemotron 3.5 Lightning" in footer
     assert "Provider: OpenRouter" in footer
     assert "Path: ↪ Rerouted" in footer
-    assert "Harness: MiniMax M3 → Nemotron 3.5 Lightning" in footer
+    assert "Harness: MiniMax M3 ❌ 402 → Nemotron 3.5 Lightning ✅" in footer
     assert "Planner:" not in footer
     assert "Reason: HTTP 402" in footer
 
@@ -549,8 +550,8 @@ def test_telemetry_case_4_planner_and_harness_both_reroute() -> None:
     assert "Model: Nemotron Ultra 550B" in footer
     assert "Provider: NVIDIA" in footer
     assert "Path: ↪ Rerouted" in footer
-    assert "Planner: MiniMax M3 → Nemotron 3.5 Lightning" in footer
-    assert "Harness: Nemotron 3.5 Lightning → Nemotron Ultra 550B" in footer
+    assert "Planner: MiniMax M3 ❌ 402 → Nemotron 3.5 Lightning ✅" in footer
+    assert "Harness: Nemotron 3.5 Lightning ❌ network error → Nemotron Ultra 550B ✅" in footer
     assert "Reason: network error" in footer
     assert "From:" not in footer
 
@@ -613,7 +614,7 @@ def test_footer_structure_rerouted_order_and_no_from_line() -> None:
     idx_latency = footer.index("⏱ Latency")
     idx_total = footer.index("└─ Total: 250ms")
     idx_path = footer.index("Path: ↪ Rerouted")
-    idx_planner = footer.index("Planner: MiniMax M3 → Nemotron 3.5 Lightning")
+    idx_planner = footer.index("Planner: MiniMax M3 ❌ 402 → Nemotron 3.5 Lightning ✅")
     idx_harness = footer.index("Harness: Nemotron 3.5 Lightning")
     idx_reason = footer.index("Reason: HTTP 402")
     idx_health = footer.index("Health: 🟢 Healthy")
@@ -891,4 +892,156 @@ def test_individual_tool_timings_remain_dynamic_in_footer() -> None:
     assert "├─ Provider: 120ms" in footer
     assert "├─ Model: 1500ms" in footer
     assert "└─ Total: 5000ms" in footer
+
+
+# ---------------------------------------------------------------------------
+# Test 29 to 33: Full Chronological Rerouting Telemetry Chain
+# ---------------------------------------------------------------------------
+
+
+def test_chronological_planner_reroute_chain_multi_candidate() -> None:
+    """Validate multi-candidate chronological Planner chain with multiple failure types."""
+    info = RuntimeInfo(
+        selected_model="gemma3:4b",
+        provider_id="ollama",
+        tier="FAST",
+        was_rerouted=True,
+        planner_was_rerouted=True,
+        planner_attempts=[
+            RerouteAttempt(model_id="minimax/minimax-m3", success=False, reason="HTTP 402"),
+            RerouteAttempt(
+                model_id="nvidia/nemotron-3.5-lightning:free",
+                success=False,
+                reason="inactivity_timeout",
+            ),
+            RerouteAttempt(
+                model_id="nvidia/nemotron-3.5-lightning-30b-a3b",
+                success=False,
+                reason="timeout",
+            ),
+            RerouteAttempt(model_id="gemma3:4b", success=True),
+        ],
+        harness_was_rerouted=False,
+        health_status="LOCAL",
+    )
+    footer = _build_runtime_footer(info)
+    expected_planner_line = (
+        "Planner: MiniMax M3 ❌ 402 → Nemotron 3.5 Lightning ❌ timeout → "
+        "Nemotron Lightning 30B ❌ timeout → Gemma 3 4B ✅"
+    )
+    assert expected_planner_line in footer
+    assert "Harness: Gemma 3 4B" in footer
+
+
+def test_chronological_planner_chain_skips_unhealthy_model() -> None:
+    """Unhealthy models that were never attempted must NOT appear in the attempt chain."""
+    info = RuntimeInfo(
+        selected_model="gemma3:4b",
+        provider_id="ollama",
+        tier="FAST",
+        was_rerouted=True,
+        planner_was_rerouted=True,
+        # MiniMax was unhealthy, so only Nemotron Lightning and Gemma were attempted
+        planner_attempts=[
+            RerouteAttempt(
+                model_id="nvidia/nemotron-3.5-lightning:free",
+                success=False,
+                reason="timeout",
+            ),
+            RerouteAttempt(
+                model_id="nvidia/nemotron-3.5-lightning-30b-a3b",
+                success=False,
+                reason="timeout",
+            ),
+            RerouteAttempt(model_id="gemma3:4b", success=True),
+        ],
+        harness_was_rerouted=False,
+        health_status="LOCAL",
+    )
+    footer = _build_runtime_footer(info)
+    expected_planner_line = (
+        "Planner: Nemotron 3.5 Lightning ❌ timeout → "
+        "Nemotron Lightning 30B ❌ timeout → Gemma 3 4B ✅"
+    )
+    assert expected_planner_line in footer
+    assert "MiniMax" not in footer
+
+
+def test_chronological_harness_reroute_chain_multi_candidate() -> None:
+    """Validate multi-candidate chronological Harness chain independent of Planner."""
+    info = RuntimeInfo(
+        selected_model="nvidia/nemotron-3-ultra-550b-a55b",
+        provider_id="nvidia",
+        tier="HEAVY",
+        was_rerouted=True,
+        planner_was_rerouted=False,
+        harness_was_rerouted=True,
+        harness_attempts=[
+            RerouteAttempt(model_id="minimax/minimax-m3", success=False, reason="HTTP 402"),
+            RerouteAttempt(
+                model_id="nvidia/nemotron-3-ultra-550b-a55b:free",
+                success=False,
+                reason="timeout",
+            ),
+            RerouteAttempt(model_id="nvidia/nemotron-3-ultra-550b-a55b", success=True),
+        ],
+        health_status="HEALTHY",
+    )
+    footer = _build_runtime_footer(info)
+    assert "Planner:" not in footer
+    expected_harness_line = (
+        "Harness: MiniMax M3 ❌ 402 → Nemotron Ultra ❌ timeout → Nemotron Ultra 550B ✅"
+    )
+    assert expected_harness_line in footer
+
+
+def test_chronological_independent_both_rerouted() -> None:
+    """Planner and Harness reroute chains must remain completely independent."""
+    info = RuntimeInfo(
+        selected_model="gemma3:4b",
+        provider_id="ollama",
+        tier="FAST",
+        was_rerouted=True,
+        planner_was_rerouted=True,
+        planner_attempts=[
+            RerouteAttempt(model_id="minimax/minimax-m3", success=False, reason="HTTP 402"),
+            RerouteAttempt(model_id="nvidia/nemotron-3.5-lightning:free", success=True),
+        ],
+        harness_was_rerouted=True,
+        harness_attempts=[
+            RerouteAttempt(
+                model_id="nvidia/nemotron-3.5-lightning:free",
+                success=False,
+                reason="network error",
+            ),
+            RerouteAttempt(model_id="gemma3:4b", success=True),
+        ],
+        health_status="LOCAL",
+    )
+    footer = _build_runtime_footer(info)
+    assert "Planner: MiniMax M3 ❌ 402 → Nemotron 3.5 Lightning ✅" in footer
+    assert "Harness: Nemotron 3.5 Lightning ❌ network error → Gemma 3 4B ✅" in footer
+
+
+def test_chronological_all_attempts_failed_no_success_indicator() -> None:
+    """When all candidate attempts fail, all display failure reasons and none displays ✅."""
+    info = RuntimeInfo(
+        selected_model="system",
+        provider_id="ahjin",
+        tier="FAST",
+        was_rerouted=True,
+        planner_was_rerouted=True,
+        planner_attempts=[
+            RerouteAttempt(model_id="minimax/minimax-m3", success=False, reason="HTTP 402"),
+            RerouteAttempt(
+                model_id="nvidia/nemotron-3.5-lightning:free",
+                success=False,
+                reason="timeout",
+            ),
+        ],
+        health_status="UNHEALTHY",
+    )
+    footer = _build_runtime_footer(info)
+    assert "Planner: MiniMax M3 ❌ 402 → Nemotron 3.5 Lightning ❌ timeout" in footer
+    assert "✅" not in footer
 

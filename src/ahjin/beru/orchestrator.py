@@ -31,7 +31,7 @@ from ahjin.beru.types import (
     RecoveryPolicy,
     StepType,
 )
-from ahjin.core.types import TaskRequest
+from ahjin.core.types import RerouteAttempt, TaskRequest
 from ahjin.models.types import ModelTier
 from ahjin.security.path_policy import SafePathPolicy
 from ahjin.telemetry import (
@@ -179,6 +179,48 @@ class BeruOrchestrator:
 
         def _make_plan(plan_steps: list[PlanStep]) -> ExecutionPlan:
             pr = planner_res
+            planner_attempts: list[RerouteAttempt] = []
+            if pr is not None and getattr(pr, "attempts_telemetry", None):
+                for att in pr.attempts_telemetry:
+                    if not att.model_id or att.model_id == "unknown":
+                        continue
+                    is_success = att.outcome in ("SUCCESS_TOOL_SELECTED", "SUCCESS_NO_TOOL")
+                    reason: str | None = None
+                    if not is_success:
+                        if att.http_error:
+                            reason = att.http_error
+                        elif att.timeout_reason:
+                            reason = att.timeout_reason
+                        elif att.error_reason:
+                            reason = att.error_reason
+                        elif att.outcome:
+                            reason = att.outcome.lower()
+                    planner_attempts.append(
+                        RerouteAttempt(
+                            model_id=att.model_id,
+                            success=is_success,
+                            reason=reason,
+                            provider_id=att.provider_id,
+                            elapsed_ms=att.elapsed_ms,
+                        )
+                    )
+            elif pr is not None and pr.was_rerouted:
+                if pr.first_failed_model:
+                    planner_attempts.append(
+                        RerouteAttempt(
+                            model_id=pr.first_failed_model,
+                            success=False,
+                            reason=pr.first_failure_reason,
+                        )
+                    )
+                if pr.selected_model:
+                    planner_attempts.append(
+                        RerouteAttempt(
+                            model_id=pr.selected_model,
+                            success=True,
+                        )
+                    )
+
             return ExecutionPlan(
                 task_id=request.task_id,
                 correlation_id=request.correlation_id,
@@ -188,6 +230,7 @@ class BeruOrchestrator:
                 planner_failed_model=pr.first_failed_model if pr is not None else None,
                 planner_failure_reason=pr.first_failure_reason if pr is not None else None,
                 planner_selected_model=pr.selected_model if pr is not None else None,
+                planner_attempts=planner_attempts,
             )
 
         # --- Phase 2: LLM Tool Intent Planner (only for ambiguous requests) ---
@@ -212,12 +255,11 @@ class BeruOrchestrator:
                 if planner_res.status == PlannerStatus.TOOL_SELECTED:
                     tool_intent = planner_res.tool_intent
                 elif planner_res.status == PlannerStatus.PLANNER_FAILURE:
-                    fail_reason = planner_res.failure_reason or "Intent planning unavailable"
                     fail_step = PlanStep(
                         step_type=StepType.TOOL_INVOCATION,
                         deterministic_output=(
-                            "⚠️ Tool intent planning was unable to process your request "
-                            f"({fail_reason}). Please retry or clarify your request."
+                            "⚠️ AHJIN is currently experiencing a slow response or "
+                            "network/provider latency issue. Please try again later."
                         ),
                     )
                     if timer is not None:

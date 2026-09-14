@@ -17,6 +17,7 @@ from ahjin.providers.types import (
     FinishReason,
     ModelInvocationRequest,
     ModelInvocationResponse,
+    StreamChunk,
     TokenUsage,
 )
 
@@ -86,6 +87,7 @@ class OpenRouterProvider(BaseModelProvider):
         if self._client is not None and not self._client.is_closed:
             try:
                 import asyncio
+
                 loop = asyncio.get_event_loop()
                 if loop.is_running():
                     asyncio.create_task(self._client.aclose())
@@ -165,9 +167,7 @@ class OpenRouterProvider(BaseModelProvider):
                 "Try a different model or retry the request."
             )
 
-        raw_finish_reason: str = (
-            choices[0].get("finish_reason") or "stop"
-        ) if choices else "stop"
+        raw_finish_reason: str = (choices[0].get("finish_reason") or "stop") if choices else "stop"
         if raw_finish_reason == "length":
             finish_reason = FinishReason.MAX_TOKENS
         elif raw_finish_reason in ("stop", "eos"):
@@ -198,9 +198,7 @@ class OpenRouterProvider(BaseModelProvider):
             model_id=str(payload["model"]),
         )
 
-    async def invoke_stream(
-        self, request: ModelInvocationRequest
-    ) -> AsyncGenerator[str, None]:
+    async def invoke_stream(self, request: ModelInvocationRequest) -> AsyncGenerator[str, None]:
         """Invoke OpenRouter API with stream=True and yield text chunks."""
         import json
 
@@ -238,20 +236,25 @@ class OpenRouterProvider(BaseModelProvider):
         async with client.stream("POST", url, json=payload, headers=headers) as response:
             response.raise_for_status()
             async for line in response.aiter_lines():
-                    line = line.strip()
-                    if not line or line.startswith(":"):
+                line = line.strip()
+                if not line or line.startswith(":"):
+                    continue
+                if line.startswith("data: "):
+                    data_str = line[6:].strip()
+                    if data_str == "[DONE]":
+                        break
+                    try:
+                        data_json = json.loads(data_str)
+                        choices = data_json.get("choices", [])
+                        if choices:
+                            delta = choices[0].get("delta", {})
+                            reasoning_chunk = delta.get("reasoning") or delta.get(
+                                "reasoning_content"
+                            )
+                            if reasoning_chunk:
+                                yield StreamChunk("", is_progress=True, is_reasoning=True)
+                            content = delta.get("content")
+                            if content:
+                                yield StreamChunk(content, is_progress=True, is_reasoning=False)
+                    except json.JSONDecodeError:
                         continue
-                    if line.startswith("data: "):
-                        data_str = line[6:].strip()
-                        if data_str == "[DONE]":
-                            break
-                        try:
-                            data_json = json.loads(data_str)
-                            choices = data_json.get("choices", [])
-                            if choices:
-                                delta = choices[0].get("delta", {})
-                                content = delta.get("content")
-                                if content:
-                                    yield content
-                        except json.JSONDecodeError:
-                            continue

@@ -81,6 +81,16 @@ class TaskRequest(BaseModel):
     metadata: RequestMetadata = Field(default_factory=RequestMetadata)
 
 
+class RerouteAttempt(BaseModel):
+    """Chronological record of a single model attempt during routing/fallback."""
+
+    model_id: str
+    success: bool
+    reason: str | None = None
+    provider_id: str | None = None
+    elapsed_ms: float = 0.0
+
+
 class RuntimeInfo(BaseModel):
     """Runtime observability metadata attached to TaskResult.
 
@@ -111,10 +121,12 @@ class RuntimeInfo(BaseModel):
     planner_failed_model: str | None = None
     planner_failure_reason: str | None = None
     planner_selected_model: str | None = None
+    planner_attempts: list[RerouteAttempt] = Field(default_factory=list)  # pyright: ignore[reportUnknownVariableType]
     harness_was_rerouted: bool = False
     harness_route_history: list[str] = Field(default_factory=list)  # pyright: ignore[reportUnknownVariableType]
     harness_failed_model: str | None = None
     harness_failure_reason: str | None = None
+    harness_attempts: list[RerouteAttempt] = Field(default_factory=list)  # pyright: ignore[reportUnknownVariableType]
     # Health of selected model at response time
     health_status: str = "UNKNOWN"
 
