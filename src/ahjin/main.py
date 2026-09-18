@@ -12,6 +12,7 @@ from ahjin.core.dispatcher import TaskDispatcher
 from ahjin.harness.gateway import ProviderGateway
 from ahjin.harness.runner import HarnessRunner
 from ahjin.interfaces.telegram.bot import TelegramAdapter
+from ahjin.agents.file_agent import FileAgent
 from ahjin.local import LocalExecutor, LocalRoutingPolicy
 from ahjin.models import ModelRouter, create_default_catalog
 from ahjin.providers.nvidia import NvidiaProvider
@@ -28,6 +29,8 @@ from ahjin.tools import (
     WebSearchTool,
 )
 from ahjin.tools.system_info import SystemInfoTool
+from ahjin.tools.image_edit import ImageEditTool
+from ahjin.tools.screen_access import ScreenAccessTool
 
 logger = structlog.get_logger()
 
@@ -44,6 +47,8 @@ async def main() -> None:
     tool_registry.register(FileSendTool())
     tool_registry.register(WebSearchTool())
     tool_registry.register(BrowserTool())
+    tool_registry.register(ImageEditTool())
+    tool_registry.register(ScreenAccessTool())
     logger.info("ToolRegistry initialized with baseline tools", tools=tool_registry.list_tools())
 
     permission_gate = AllowAllPermissionGate()
@@ -78,6 +83,15 @@ async def main() -> None:
     tool_planner = ToolIntentPlanner(gateway=gateway, tool_registry=tool_registry)
     orchestrator = BeruOrchestrator(tool_planner=tool_planner)
 
+    # Build FileAgent wired to shared tool registry instances
+    file_agent = FileAgent(
+        search_tool=tool_registry.get_tool("file_search"),
+        send_tool=tool_registry.get_tool("file_send"),
+        image_edit_tool=tool_registry.get_tool("image_edit"),
+        gateway=gateway,
+        tool_planner=tool_planner,
+    )
+
     runner = HarnessRunner(
         gateway=gateway,
         local_executor=local_executor,
@@ -85,7 +99,7 @@ async def main() -> None:
         permission_gate=permission_gate,
     )
     dispatcher = TaskDispatcher(orchestrator=orchestrator, runner=runner)
-    adapter = TelegramAdapter(dispatcher=dispatcher, router=router)
+    adapter = TelegramAdapter(dispatcher=dispatcher, router=router, file_agent=file_agent)
 
     logger.info("AHJIN 2.0 initialization complete — Multi-Model Router ready")
 

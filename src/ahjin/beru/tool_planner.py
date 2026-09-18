@@ -20,6 +20,7 @@ from ahjin.tools.system_info import SAFE_FIELDS_WHITELIST
 if TYPE_CHECKING:
     from ahjin.harness.gateway import ProviderGateway
     from ahjin.tools.registry import ToolRegistry
+    from ahjin.core.types import ConversationTurn
 
 logger = structlog.get_logger()
 
@@ -388,6 +389,26 @@ AVAILABLE TOOLS AND THEIR CAPABILITIES
      "direction": "down" or "up"
      "key": key name e.g. "Enter"
 
+7. image_edit
+   CAN DO: Edit, compress, or resize a local image file using PIL.
+   USE when: the user wants to compress, shrink, enlarge, or resize an image file.
+   PARAMETERS:
+     "path": target file path or filename (e.g. "downloads/photo.jpg", "myphoto").
+     "operation": "compress" or "enlarge" or "resize".
+     "target_kb": optional integer size limit in KB (for compress).
+     "target_dimensions": optional string "WIDTHxHEIGHT" (e.g. "2000x2000").
+     "scale": optional scale multiplier string (e.g. "2x").
+
+   NOTE: Even if the exact path or extension is unknown, ALWAYS output image_edit —
+   the agent will find the file automatically using its path-resolution logic.
+
+8. screen_access
+   CAN DO: Start a local screen streaming server and open a public tunnel so the user
+   can view and control the desktop screen remotely via a web browser.
+   USE when: the user asks to view the screen, share the screen, or get remote screen access.
+   PARAMETERS:
+     None.
+
 ═══════════════════════════════════════════════════════════════════════════════
 SEMANTIC DECISION RULES
 ═══════════════════════════════════════════════════════════════════════════════
@@ -465,6 +486,10 @@ OUTPUT EXAMPLES
 {"tool_name": "browser",
  "parameters": {"action": "navigate", "url": "https://web.whatsapp.com"},
  "requires_reasoning": false}
+{"tool_name": "image_edit",
+ "parameters": {"path": "downloads/photo.jpg", "operation": "compress", "target_kb": 200},
+ "requires_reasoning": false}
+{"tool_name": "screen_access", "parameters": {}, "requires_reasoning": false}
 {"tool_name": "none", "parameters": {}, "requires_reasoning": false}
 """
 
@@ -555,13 +580,22 @@ class ToolIntentPlanner:
         raw_content = "".join(chunks).strip()
         return raw_content, selected_model_id
 
-    async def plan_tool_intent(self, text: str) -> PlannerResult:
+    async def plan_tool_intent(
+        self,
+        text: str,
+        conversation_history: "list[ConversationTurn] | None" = None,
+    ) -> PlannerResult:
         """Attempt to plan a structured tool invocation from natural language text.
 
         Uses model-agnostic fallback via ModelRouter: if the primary candidate fails
         (HTTP error, timeout, network error, invalid JSON), it is excluded and the next
         eligible model candidate from the catalog is attempted until the recovery budget
         is exhausted.
+
+        Args:
+            text: The raw user message.
+            conversation_history: Optional prior ConversationTurns for context-aware
+                intent resolution (e.g. user says "yes do it" after a file was found).
 
         Returns:
             A PlannerResult with status TOOL_SELECTED, NO_TOOL, or PLANNER_FAILURE.
@@ -577,6 +611,7 @@ class ToolIntentPlanner:
         prompt = ContextualizedPrompt(
             system_instruction=_PLANNER_SYSTEM_PROMPT,
             user_instruction=text,
+            conversation_history=list(conversation_history) if conversation_history else [],
         )
         requirements = CapabilityRequirements(
             requires_reasoning=False,

@@ -16,29 +16,29 @@ from ahjin.models.types import (
 
 
 def test_fast_execution_tier_selected_for_general_tasks() -> None:
-    """MiniMax M3 (Primary) selected for general tasks; fallback selects OpenRouter Lightning."""
+    """Nex N2.5 Pro (Primary) selected for general tasks; fallback selects OpenRouter Lightning."""
     router = ModelRouter(catalog=create_default_catalog())
     reqs = CapabilityRequirements(requires_reasoning=False, requires_code=False)
 
     selection = router.select_model(reqs)
-    assert selection.model_id == "minimax/minimax-m3"
+    assert selection.model_id == "nex-agi/nex-n2.5-pro:free"
     assert selection.tier == ModelTier.FAST
     assert selection.max_output_tokens == 4096
 
-    # When MiniMax is excluded, OpenRouter Nemotron Lightning is selected
-    fallback = router.select_model(reqs, excluded_model_ids={"minimax/minimax-m3"})
+    # When Nex is excluded, OpenRouter Nemotron Lightning is selected
+    fallback = router.select_model(reqs, excluded_model_ids={"nex-agi/nex-n2.5-pro:free"})
     assert fallback.model_id == "nvidia/nemotron-3.5-lightning:free"
     assert fallback.tier == ModelTier.FAST
 
 
 def test_heavy_reasoning_tier_selected_when_reasoning_required() -> None:
-    """Heavy tier must be selected when reasoning is explicitly required (MiniMax M3 preferred)."""
+    """Heavy tier must be selected when reasoning is explicitly required (Nex N2.5 Pro preferred)."""
     router = ModelRouter(catalog=create_default_catalog())
     reqs = CapabilityRequirements(requires_reasoning=True)
 
     selection = router.select_model(reqs)
     assert selection.tier == ModelTier.HEAVY
-    assert selection.model_id == "minimax/minimax-m3"
+    assert selection.model_id == "nex-agi/nex-n2.5-pro:free"
 
 
 def test_stronger_incapable_model_must_never_beat_weaker_capable_model() -> None:
@@ -191,11 +191,11 @@ def test_unhealthy_strongest_model_skipped_and_healthy_alternative_selected() ->
     catalog = create_default_catalog()
     health = ModelHealthTracker()
 
-    # Mark top MiniMax M3 model unhealthy
-    health.record_failure("minimax/minimax-m3")
-    health.record_failure("minimax/minimax-m3")
-    health.record_failure("minimax/minimax-m3")
-    target_state = health.get_state("minimax/minimax-m3")
+    # Mark top Nex N2.5 Pro model unhealthy
+    health.record_failure("nex-agi/nex-n2.5-pro:free")
+    health.record_failure("nex-agi/nex-n2.5-pro:free")
+    health.record_failure("nex-agi/nex-n2.5-pro:free")
+    target_state = health.get_state("nex-agi/nex-n2.5-pro:free")
     assert target_state.status == ModelHealthStatus.UNHEALTHY
 
     router = ModelRouter(catalog=catalog, health_tracker=health)
@@ -276,11 +276,11 @@ async def test_harness_same_request_rerouting_on_degraded_model_failure() -> Non
         provider_id = "openrouter"
 
         def get_default_model_id(self) -> str:
-            return "minimax/minimax-m3"
+            return "nex-agi/nex-n2.5-pro:free"
 
         async def invoke(self, request: ModelInvocationRequest) -> ModelInvocationResponse:
             invoked_models.append(request.model_id)
-            if request.model_id == "minimax/minimax-m3":
+            if request.model_id == "nex-agi/nex-n2.5-pro:free":
                 # Standard httpx exception without custom model_id attribute
                 raise httpx.RequestError(
                     "Connection reset",
@@ -323,8 +323,8 @@ async def test_harness_same_request_rerouting_on_degraded_model_failure() -> Non
     assert res.success is True
     assert res.output_text == "Response from alternative model"
     # Verify that the primary model was attempted first, failed, and WAS NOT selected again
-    assert invoked_models[0] == "minimax/minimax-m3"
-    assert "minimax/minimax-m3" not in invoked_models[1:]
+    assert invoked_models[0] == "nex-agi/nex-n2.5-pro:free"
+    assert "nex-agi/nex-n2.5-pro:free" not in invoked_models[1:]
     assert invoked_models[1] == "nvidia/nemotron-3-ultra-550b-a55b:free"
     assert invoked_models[0] != invoked_models[1]
 

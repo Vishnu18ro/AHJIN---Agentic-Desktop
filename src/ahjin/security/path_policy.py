@@ -1,5 +1,6 @@
 """SafePathPolicy — Enforces authorized PC root containment and sensitive file blacklisting."""
 
+import platform
 from pathlib import Path
 from typing import ClassVar
 
@@ -75,7 +76,7 @@ class SafePathPolicy:
         elif include_user_folders:
             home = Path.home().resolve()
             onedrive = home / "OneDrive"
-            candidate_folders = [
+            candidate_folders: list[Path] = [
                 home / "Desktop",
                 onedrive / "Desktop",
                 home / "Documents",
@@ -83,6 +84,27 @@ class SafePathPolicy:
                 home / "Downloads",
                 onedrive / "Downloads",
             ]
+
+            if platform.system() == "Windows":
+                import winreg
+                try:
+                    with winreg.OpenKey(
+                        winreg.HKEY_CURRENT_USER,
+                        r"Software\Microsoft\Windows\CurrentVersion\Explorer\Shell Folders",
+                    ) as k:
+                        desktop = winreg.QueryValueEx(k, "Desktop")[0]
+                        documents = winreg.QueryValueEx(k, "Personal")[0]
+                        downloads = winreg.QueryValueEx(
+                            k, "{374DE290-123F-4565-9164-39C4925E467B}"
+                        )[0]
+                        for raw_path in (desktop, documents, downloads):
+                            if raw_path:
+                                p = Path(raw_path).resolve()
+                                if p not in candidate_folders:
+                                    candidate_folders.append(p)
+                except Exception:
+                    pass
+
             for folder in candidate_folders:
                 if folder.exists() and folder.is_dir() and folder not in roots:
                     roots.append(folder)
@@ -148,7 +170,33 @@ class SafePathPolicy:
                 for auth_root in self.authorized_roots:
                     if auth_root.name.lower() == folder_name.lower() and auth_root.exists():
                         return auth_root.resolve()
-                for candidate in [home / folder_name, onedrive / folder_name]:
+                candidates_sc: list[Path] = [home / folder_name, onedrive / folder_name]
+                if platform.system() == "Windows":
+                    import winreg
+                    try:
+                        with winreg.OpenKey(
+                            winreg.HKEY_CURRENT_USER,
+                            r"Software\Microsoft\Windows\CurrentVersion\Explorer\Shell Folders",
+                        ) as k:
+                            if folder_name.lower() == "desktop":
+                                candidates_sc.append(
+                                    Path(winreg.QueryValueEx(k, "Desktop")[0]).resolve()
+                                )
+                            elif folder_name.lower() == "documents":
+                                candidates_sc.append(
+                                    Path(winreg.QueryValueEx(k, "Personal")[0]).resolve()
+                                )
+                            elif folder_name.lower() == "downloads":
+                                candidates_sc.append(
+                                    Path(
+                                        winreg.QueryValueEx(
+                                            k, "{374DE290-123F-4565-9164-39C4925E467B}"
+                                        )[0]
+                                    ).resolve()
+                                )
+                    except Exception:
+                        pass
+                for candidate in candidates_sc:
                     if candidate.exists() and candidate.is_dir():
                         return candidate.resolve()
 
@@ -167,6 +215,31 @@ class SafePathPolicy:
                     r for r in self.authorized_roots if r.name.lower() == folder_name.lower()
                 ]
                 candidates.extend([home / folder_name, onedrive / folder_name])
+                if platform.system() == "Windows":
+                    import winreg
+                    try:
+                        with winreg.OpenKey(
+                            winreg.HKEY_CURRENT_USER,
+                            r"Software\Microsoft\Windows\CurrentVersion\Explorer\Shell Folders",
+                        ) as k:
+                            if prefix == "desktop":
+                                candidates.append(
+                                    Path(winreg.QueryValueEx(k, "Desktop")[0]).resolve()
+                                )
+                            elif prefix == "documents":
+                                candidates.append(
+                                    Path(winreg.QueryValueEx(k, "Personal")[0]).resolve()
+                                )
+                            elif prefix == "downloads":
+                                candidates.append(
+                                    Path(
+                                        winreg.QueryValueEx(
+                                            k, "{374DE290-123F-4565-9164-39C4925E467B}"
+                                        )[0]
+                                    ).resolve()
+                                )
+                    except Exception:
+                        pass
                 for candidate_root in candidates:
                     p = candidate_root / rel_part
                     if p.exists() or p.parent.exists():

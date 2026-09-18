@@ -358,3 +358,77 @@ class FileSearchTool(BaseTool):
             except ValueError:
                 pass
         return file_path.as_posix()
+
+    def find_matching_files(
+        self,
+        query: str,
+        path_str: str = ".",
+        file_extensions: list[str] | None = None,
+        max_results: int = 10,
+    ) -> list[Path]:
+        """Programmatically find and rank matching files across authorized roots.
+
+        Returns ranked list of Path objects (exact stem match > filename match > path match).
+        Used by FileAgent for conversational multi-turn file disambiguation.
+        """
+        clean_query = query.strip().lower()
+        if not clean_query:
+            return []
+
+        is_safe, search_roots, _ = self.path_policy.get_search_roots(path_str)
+        if not is_safe or not search_roots:
+            return []
+
+        target_exts: set[str] | None = None
+        if file_extensions:
+            target_exts = {
+                e.lower() if e.startswith(".") else f".{e.lower()}"
+                for e in file_extensions
+                if isinstance(e, str) and e.strip()
+            }
+
+        ranked_matches: list[tuple[int, Path]] = []
+        seen: set[Path] = set()
+        scanned = 0
+
+        for search_root in search_roots:
+            if len(ranked_matches) >= max_results:
+                break
+            start_dir = search_root if search_root.is_dir() else search_root.parent
+            if not start_dir.exists():
+                continue
+            for root, dirs, files in os.walk(start_dir):
+                dirs[:] = [d for d in dirs if d.lower() not in _EXCLUDED_DIRS]
+                for file_name in files:
+                    if len(ranked_matches) >= max_results or scanned >= _MAX_FILES_SCANNED:
+                        break
+                    file_path = Path(root) / file_name
+                    if self.path_policy.is_sensitive_file(file_path):
+                        continue
+                    if self.path_policy.is_system_blocked(file_path):
+                        continue
+                    if target_exts and file_path.suffix.lower() not in target_exts:
+                        continue
+                    scanned += 1
+
+                    file_name_lower = file_name.lower()
+                    file_stem_lower = file_path.stem.lower()
+                    display_path_lower = self._compute_display_path(file_path).lower()
+
+                    rank = 999
+                    if file_stem_lower == clean_query:
+                        rank = 1
+                    elif clean_query in file_name_lower:
+                        rank = 2
+                    elif (
+                        clean_query in display_path_lower
+                        or clean_query in file_path.as_posix().lower()
+                    ):
+                        rank = 3
+
+                    if rank < 999 and file_path not in seen:
+                        seen.add(file_path)
+                        ranked_matches.append((rank, file_path))
+
+        ranked_matches.sort(key=lambda x: x[0])
+        return [p for _, p in ranked_matches[:max_results]]

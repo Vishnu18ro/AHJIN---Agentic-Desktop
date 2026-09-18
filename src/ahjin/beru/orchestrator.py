@@ -248,7 +248,10 @@ class BeruOrchestrator:
             if needs_planner:
                 if timer is not None:
                     timer.start_stage(STAGE_TOOL_PLANNER)
-                planner_res = await self.tool_planner.plan_tool_intent(text)  # type: ignore[union-attr]
+                planner_res = await self.tool_planner.plan_tool_intent(  # type: ignore[union-attr]
+                    text,
+                    conversation_history=request.context.conversation_history or None,
+                )
                 if timer is not None:
                     timer.end_stage(STAGE_TOOL_PLANNER)
 

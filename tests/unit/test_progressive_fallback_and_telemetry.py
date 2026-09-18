@@ -722,7 +722,7 @@ async def test_orchestrator_forwards_planner_reroute_to_execution_plan() -> None
     """BeruOrchestrator must forward planner route history onto the ExecutionPlan."""
 
     class MockPlanner:
-        async def plan_tool_intent(self, text: str) -> PlannerResult:
+        async def plan_tool_intent(self, text: str, **kwargs: object) -> PlannerResult:
             return PlannerResult(
                 status=PlannerStatus.NO_TOOL,
                 attempted_models=["minimax/minimax-m3", "nvidia/nemotron-3.5-lightning:free"],

@@ -15,6 +15,7 @@ dependencies = [
     "python-telegram-bot>=21.0.0",
     "structlog>=24.1.0",
     "pypdf>=4.0.0",
+    "Pillow>=10.0.0",
 ]
 
 [project.optional-dependencies]
@@ -24,6 +25,16 @@ dev = [
     "pyright>=1.1.0",
     "ruff>=0.3.0",
     "import-linter>=2.0",
+]
+# Optional screen-sharing dependencies.
+# Install with: pip install "ahjin[screen]"
+# AHJIN starts normally without these; screen_access tool will report a
+# friendly error if invoked when deps are missing.
+screen = [
+    "fastapi>=0.111.0",
+    "uvicorn>=0.29.0",
+    "mss>=9.0.0",
+    "pyautogui>=0.9.54",
 ]
 
 [tool.hatch.build.targets.wheel]

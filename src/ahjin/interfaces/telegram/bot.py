@@ -6,7 +6,7 @@ from typing import Any
 
 import structlog
 from telegram import Update
-from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandler, filters
+from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes, MessageHandler, filters
 
 from ahjin.core.config import settings
 from ahjin.core.dispatcher import TaskDispatcher
@@ -15,6 +15,7 @@ from ahjin.interfaces.base import BaseInterfaceAdapter
 from ahjin.interfaces.telegram.mapper import TelegramMapper
 from ahjin.models.health import ModelHealthStatus
 from ahjin.models.router import ModelRouter
+from ahjin.agents.file_agent import FileAgent
 from ahjin.telemetry import (
     STAGE_BERU_ANALYSIS,
     STAGE_CONTEXT_ASSEMBLY,
@@ -423,12 +424,16 @@ class TelegramAdapter(BaseInterfaceAdapter):
         token: str | None = None,
         dispatcher: TaskDispatcher | None = None,
         router: ModelRouter | None = None,
+        file_agent: FileAgent | None = None,
     ) -> None:
         self.token = token or settings.telegram_bot_token
         self.dispatcher = dispatcher or TaskDispatcher()
         self.router = router  # Optional; enables /health and /models commands
+        self.file_agent = file_agent  # Optional; enables FileAgent multi-turn handling
         self.app: Application[Any, Any, Any, Any, Any, Any] | None = None
         self._stop_event: asyncio.Event = asyncio.Event()
+        # Rolling per-chat conversation history (max 10 turns) for context threading
+        self.chat_history: dict[int, list[dict[str, str]]] = {}
 
     @property
     def interface_id(self) -> str:
@@ -460,16 +465,42 @@ class TelegramAdapter(BaseInterfaceAdapter):
         if not update.message or not update.message.text:
             return
 
+        # 0. Intercept with FileAgent for multi-turn file search/disambiguation.
+        #    If FileAgent claims the message (returns True), it has handled the
+        #    full Telegram reply itself; skip the main AHJIN pipeline.
+        if self.file_agent is not None:
+            try:
+                handled = await self.file_agent.handle_message(update, context)
+                if handled:
+                    return
+            except Exception as fa_err:
+                logger.warning(
+                    "FileAgent intercept raised an error; falling through to main pipeline",
+                    error=str(fa_err),
+                )
+
         t0_recv = time.monotonic()
         chat_id = update.message.chat_id
         text = update.message.text
 
         logger.info("[PROFILE] Telegram update received", chat_id=chat_id, text_length=len(text))
 
-        # 1. Map Telegram input to TaskRequest
+        # 1. Build rolling chat history for this chat (max 10 turns)
+        if chat_id not in self.chat_history:
+            self.chat_history[chat_id] = []
+        # Snapshot last 10 turns BEFORE appending current message
+        history_snapshot = self.chat_history[chat_id][-10:]
+
+        # 2. Map Telegram input to TaskRequest (with conversation history)
         t0_map = time.monotonic()
-        request = TelegramMapper.to_task_request(chat_id, text)
+        request = TelegramMapper.to_task_request(chat_id, text, history_snapshot)
         t_map_ms = (time.monotonic() - t0_map) * 1000.0
+
+        # Append current user message to rolling history
+        self.chat_history[chat_id].append({"role": "user", "content": text})
+        # Keep history bounded
+        if len(self.chat_history[chat_id]) > 20:
+            self.chat_history[chat_id] = self.chat_history[chat_id][-20:]
 
         # 2. Send initial placeholder message
         t0_placeholder = time.monotonic()
@@ -542,6 +573,12 @@ class TelegramAdapter(BaseInterfaceAdapter):
             response_text = TelegramMapper.to_telegram_response(final_task_result)
         if not response_text:
             response_text = accumulated_text or "No response received."
+
+        # Append assistant response to rolling history (body only, no footer, to save tokens)
+        if response_text and response_text != "No response received.":
+            self.chat_history.setdefault(chat_id, []).append(
+                {"role": "assistant", "content": response_text}
+            )
 
         # --- Single-message delivery: build footer BEFORE chunking ---
         # We estimate STAGE_TELEGRAM_DELIVERY using the time elapsed since
@@ -657,6 +694,21 @@ class TelegramAdapter(BaseInterfaceAdapter):
             was_rerouted=was_rerouted,
         )
 
+    async def _handle_callback(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Handle inline keyboard button callback queries.
+
+        Delegates to FileAgent when available so it can process file
+        disambiguation selections from inline buttons.
+        """
+        if self.file_agent is not None:
+            try:
+                await self.file_agent.handle_callback(update, context)
+            except Exception as cb_err:
+                logger.warning(
+                    "FileAgent callback handler raised an error",
+                    error=str(cb_err),
+                )
+
     async def start(self) -> None:
         """Start Telegram bot application and block until stopped."""
         if not self.token:
@@ -667,6 +719,7 @@ class TelegramAdapter(BaseInterfaceAdapter):
         self.app.add_handler(CommandHandler("start", self._start_command))
         self.app.add_handler(CommandHandler("health", self._health_command))
         self.app.add_handler(CommandHandler("models", self._models_command))
+        self.app.add_handler(CallbackQueryHandler(self._handle_callback))
         self.app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, self._handle_message))
 
         logger.info("Starting Telegram bot polling...")

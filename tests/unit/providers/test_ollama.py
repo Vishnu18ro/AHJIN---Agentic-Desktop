@@ -36,7 +36,7 @@ def test_local_ollama_models_catalog_registration() -> None:
     fast_cloud = catalog.get_model("nvidia/nemotron-3.5-lightning-30b-a3b")
     assert fast_cloud.priority > gemma.priority
 
-    heavy_cloud = catalog.get_model("minimax/minimax-m3")
+    heavy_cloud = catalog.get_model("nex-agi/nex-n2.5-pro:free")
     assert heavy_cloud.priority > qwen.priority
 
 

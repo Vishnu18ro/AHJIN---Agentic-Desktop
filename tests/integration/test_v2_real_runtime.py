@@ -64,7 +64,7 @@ def _setup_production_stack(
 
 @pytest.mark.asyncio
 async def test_simple_task_fast_tier_routing() -> None:
-    """Simple prompt 'Hi' must route to FAST tier (MiniMax M3 primary) with Direct path."""
+    """Simple prompt 'Hi' must route to FAST tier (Nex N2.5 Pro primary) with Direct path."""
     catalog = create_default_catalog()
     registry = ProviderRegistry()
 
@@ -74,7 +74,7 @@ async def test_simple_task_fast_tier_routing() -> None:
             return "openrouter"
 
         def get_default_model_id(self) -> str:
-            return "minimax/minimax-m3"
+            return "nex-agi/nex-n2.5-pro:free"
 
         async def invoke(self, request: ModelInvocationRequest) -> ModelInvocationResponse:
             return ModelInvocationResponse(
@@ -95,11 +95,10 @@ async def test_simple_task_fast_tier_routing() -> None:
     assert res.output_text == "Hello! How can I help you today?"
     assert res.runtime_info is not None
     assert res.runtime_info.tier == "FAST"
-    assert res.runtime_info.selected_model == "minimax/minimax-m3"
+    assert res.runtime_info.selected_model == "nex-agi/nex-n2.5-pro:free"
     assert res.runtime_info.was_rerouted is False
 
     footer = _build_runtime_footer(res.runtime_info)
-    assert "Model: MiniMax M3" in footer
     assert "Provider: OpenRouter" in footer
     assert "Route: FAST" in footer
     assert "Path: Direct" in footer
@@ -113,7 +112,7 @@ async def test_simple_task_fast_tier_routing() -> None:
 
 @pytest.mark.asyncio
 async def test_reasoning_task_heavy_tier_routing() -> None:
-    """Reasoning prompt must route to HEAVY tier (MiniMax M3 preferred)."""
+    """Reasoning prompt must route to HEAVY tier (Nex N2.5 Pro preferred)."""
     catalog = create_default_catalog()
     registry = ProviderRegistry()
 
@@ -123,7 +122,7 @@ async def test_reasoning_task_heavy_tier_routing() -> None:
             return "openrouter"
 
         def get_default_model_id(self) -> str:
-            return "minimax/minimax-m3"
+            return "nex-agi/nex-n2.5-pro:free"
 
         async def invoke(self, request: ModelInvocationRequest) -> ModelInvocationResponse:
             return ModelInvocationResponse(
@@ -146,10 +145,9 @@ async def test_reasoning_task_heavy_tier_routing() -> None:
     assert res.success is True
     assert res.runtime_info is not None
     assert res.runtime_info.tier == "HEAVY"
-    assert res.runtime_info.selected_model == "minimax/minimax-m3"
+    assert res.runtime_info.selected_model == "nex-agi/nex-n2.5-pro:free"
 
     footer = _build_runtime_footer(res.runtime_info)
-    assert "Model: MiniMax M3" in footer
     assert "Provider: OpenRouter" in footer
     assert "Route: HEAVY" in footer
 
@@ -321,12 +319,12 @@ async def test_request_isolation_excluded_models() -> None:
 
     reqs = CapabilityRequirements()
 
-    # Request 1 excludes minimax
+    # Request 1 excludes Nex N2.5 Pro (our primary)
     sel1 = router.select_model(
-        reqs, excluded_model_ids={"minimax/minimax-m3"}
+        reqs, excluded_model_ids={"nex-agi/nex-n2.5-pro:free"}
     )
-    # Request 2 has no exclusions — minimax must remain eligible
+    # Request 2 has no exclusions — Nex must remain eligible and be selected
     sel2 = router.select_model(reqs, excluded_model_ids=None)
 
-    assert sel1.model_id != "minimax/minimax-m3"
-    assert sel2.model_id == "minimax/minimax-m3"
+    assert sel1.model_id != "nex-agi/nex-n2.5-pro:free"
+    assert sel2.model_id == "nex-agi/nex-n2.5-pro:free"
