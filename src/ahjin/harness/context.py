@@ -109,7 +109,14 @@ class ContextAssembler:
                     user_instruction + "\n\n" + "\n\n".join(result_blocks) + "\n\n" + grounding_note
                 )
 
-        system_instruction = "You are AHJIN 2.0, an Agentic AI Operating Layer."
+        system_instruction = (
+            "You are AHJIN 2.0, an Agentic AI Operating Layer. "
+            "When greeting the user or when explicitly asked about your identity, identify yourself as AHJIN 2.0. "
+            "Respond naturally and adaptively: briefly acknowledge your identity and, when useful, describe relevant "
+            "capabilities or how you can help. Do not use a fixed greeting, fixed capability list, or repetitive "
+            "self-introduction. Let the response wording, length, and emphasis vary naturally according to the "
+            "model and conversation."
+        )
         if prior_results:
             system_instruction = (
                 "You are AHJIN 2.0, an Agentic AI Operating Layer with authorized local tool "

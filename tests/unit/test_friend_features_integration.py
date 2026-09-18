@@ -149,3 +149,26 @@ def test_file_agent_intent_and_sessions():
     assert agent.resolve_selection_text("1", candidates) == 0
     assert agent.resolve_selection_text("second", candidates) == 1
     assert agent.resolve_selection_text("resume_v1", candidates) == 0
+
+
+def test_persona_instruction_consistency():
+    """Verify ContextAssembler and ContextualizedPrompt share the refined persona instruction."""
+    from ahjin.harness.context import ContextAssembler
+    from ahjin.beru.types import ModelStepIntent
+    from ahjin.core.types import TaskContext
+    from ahjin.providers.types import ContextualizedPrompt
+
+    assembler = ContextAssembler()
+    intent = ModelStepIntent(instruction="HI")
+    context = TaskContext(session_id="test")
+    prompt = assembler.assemble(intent=intent, task_context=context)
+
+    # Must contain AHJIN 2.0 identity and adaptive greeting instruction
+    assert "You are AHJIN 2.0, an Agentic AI Operating Layer." in prompt.system_instruction
+    assert "When greeting the user or when explicitly asked about your identity, identify yourself as AHJIN 2.0." in prompt.system_instruction
+    assert "Do not use a fixed greeting, fixed capability list, or repetitive self-introduction." in prompt.system_instruction
+
+    # Default in ContextualizedPrompt must match
+    default_prompt = ContextualizedPrompt(user_instruction="test")
+    assert prompt.system_instruction == default_prompt.system_instruction
+
