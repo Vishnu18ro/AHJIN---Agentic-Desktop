@@ -1,4 +1,4 @@
-﻿"""Conversational File Agent ΓÇö Multi-turn file search, location clarification, and disambiguation."""
+"""Conversational File Agent ΓÇö Multi-turn file search, location clarification, and disambiguation."""
 
 import re
 import time
@@ -143,6 +143,11 @@ class FileAgent:
         self.tool_planner = tool_planner or ToolIntentPlanner()
         self.session_manager = FileSessionManager()
 
+    def is_session_active(self, chat_id: int) -> bool:
+        """Check if there is an active (non-IDLE) multi-turn file session for the chat."""
+        session = self.session_manager.get_session(chat_id)
+        return session.state != FileSessionState.IDLE
+
     def detect_file_intent(self, text: str) -> tuple[bool, str, str | None]:
         """Detect if text is a file retrieval/search request.
 
@@ -157,9 +162,13 @@ class FileAgent:
             return False, "", None
 
         # Exclude questions that are clearly not asking for files
-        if any(lower.startswith(prefix) for prefix in ("how do i", "explain", "what is", "why is", "who is")):
+        if any(lower.startswith(prefix) for prefix in ("how do i", "explain", "what is", "why is", "who is", "tell me")):
             if not any(k in lower for k in ("my resume", "my file", "send file", "find file")):
                 return False, "", None
+
+        # Exclude web / browser / online queries
+        if any(w in lower for w in ("the web", "online", "internet", "google", "browser", "website", "news")):
+            return False, "", None
 
         # Location keyword check
         detected_location: str | None = None
@@ -262,7 +271,7 @@ class FileAgent:
         # 1. Check if user wants to cancel an active file conversation
         if session.state != FileSessionState.IDLE and text.lower() in ("cancel", "stop", "nevermind", "abort", "exit"):
             self.session_manager.reset_session(chat_id)
-            await update.message.reply_text("Γ¥î File search cancelled.")
+            await update.message.reply_text("❌ File search cancelled.")
             return True
 
         # 2. State: AWAITING_LOCATION
@@ -287,32 +296,11 @@ class FileAgent:
                 )
                 return True
 
-        # 4. State: IDLE ΓÇö Check if this is a new file request
-        intent = await self.tool_planner.plan_tool_intent(text)
-        if not intent:
-            return False
-
-        detected_loc = None
-        query = ""
-
-        if intent.tool_name == "file_search":
-            query = str(intent.parameters.get("query", ""))
-            detected_loc = str(intent.parameters.get("path", ""))
-        elif intent.tool_name == "image_edit":
-            path_str = str(intent.parameters.get("path", ""))
-            query = Path(path_str).name if path_str else ""
-            detected_loc = str(Path(path_str).parent) if path_str and "/" in path_str else None
-            session.image_operation = str(intent.parameters.get("operation", ""))
-            try:
-                session.target_kb = int(intent.parameters.get("target_kb", 0)) or None
-            except ValueError:
-                pass
-            session.target_dimensions = intent.parameters.get("target_dimensions")
-            session.scale = intent.parameters.get("scale")
-        else:
-            return False
-
-        if not query:
+        # 4. State: IDLE — Deterministic local check only.
+        # NEVER invoke remote LLM planner (tool_planner.plan_tool_intent) while IDLE.
+        # Canonical BERU orchestrator remains authoritative for tool planning.
+        is_file_req, query, detected_loc = self.detect_file_intent(text)
+        if not is_file_req or not query:
             return False
 
         session.query = query
@@ -326,7 +314,7 @@ class FileAgent:
         # Ask user where to search
         session.state = FileSessionState.AWAITING_LOCATION
         reply_text = (
-            f"≡ƒôü Where should I search for **\"{query}\"**?\n\n"
+            f"📁 Where should I search for **\"{query}\"**?\n\n"
             "Tap an option below or type your answer (e.g. *\"downloads\"* or *\"search everywhere\"*):"
         )
         await update.message.reply_text(

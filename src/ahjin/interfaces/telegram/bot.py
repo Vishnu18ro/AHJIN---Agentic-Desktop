@@ -465,33 +465,43 @@ class TelegramAdapter(BaseInterfaceAdapter):
         if not update.message or not update.message.text:
             return
 
-        # 0. Intercept with FileAgent for multi-turn file search/disambiguation.
-        #    If FileAgent claims the message (returns True), it has handled the
-        #    full Telegram reply itself; skip the main AHJIN pipeline.
-        if self.file_agent is not None:
-            try:
-                handled = await self.file_agent.handle_message(update, context)
-                if handled:
-                    return
-            except Exception as fa_err:
-                logger.warning(
-                    "FileAgent intercept raised an error; falling through to main pipeline",
-                    error=str(fa_err),
-                )
-
         t0_recv = time.monotonic()
         chat_id = update.message.chat_id
         text = update.message.text
 
         logger.info("[PROFILE] Telegram update received", chat_id=chat_id, text_length=len(text))
 
-        # 1. Build rolling chat history for this chat (max 10 turns)
+        # 1. Send initial placeholder message immediately after basic validation
+        t0_placeholder = time.monotonic()
+        placeholder_msg = await update.message.reply_text("Thinking...")
+        t_placeholder_ms = (time.monotonic() - t0_placeholder) * 1000.0
+
+        # 2. Check FileAgent active session
+        #    ACTIVE: FileAgent handles multi-turn interaction (awaiting location / selection)
+        #    IDLE: canonical AHJIN pipeline (Dispatcher -> BERU -> Tool Intent Planner -> Runner)
+        if self.file_agent is not None and self.file_agent.is_session_active(chat_id):
+            try:
+                handled = await self.file_agent.handle_message(update, context)
+                if handled:
+                    # Clean up placeholder message since FileAgent delivered its own interaction
+                    try:
+                        await placeholder_msg.delete()
+                    except Exception:
+                        pass
+                    return
+            except Exception as fa_err:
+                logger.warning(
+                    "FileAgent active session handling raised an error; falling through to main pipeline",
+                    error=str(fa_err),
+                )
+
+        # 3. Build rolling chat history for this chat (max 10 turns)
         if chat_id not in self.chat_history:
             self.chat_history[chat_id] = []
         # Snapshot last 10 turns BEFORE appending current message
         history_snapshot = self.chat_history[chat_id][-10:]
 
-        # 2. Map Telegram input to TaskRequest (with conversation history)
+        # 4. Map Telegram input to TaskRequest (with conversation history)
         t0_map = time.monotonic()
         request = TelegramMapper.to_task_request(chat_id, text, history_snapshot)
         t_map_ms = (time.monotonic() - t0_map) * 1000.0
@@ -501,11 +511,6 @@ class TelegramAdapter(BaseInterfaceAdapter):
         # Keep history bounded
         if len(self.chat_history[chat_id]) > 20:
             self.chat_history[chat_id] = self.chat_history[chat_id][-20:]
-
-        # 2. Send initial placeholder message
-        t0_placeholder = time.monotonic()
-        placeholder_msg = await update.message.reply_text("Thinking...")
-        t_placeholder_ms = (time.monotonic() - t0_placeholder) * 1000.0
 
         accumulated_text = ""
         first_token_received = False
