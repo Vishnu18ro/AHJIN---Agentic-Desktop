@@ -84,8 +84,8 @@ def _provider_display_name(provider_id: str) -> str:
 def _model_short_name(model_id: str) -> str:
     """Return a compact, human-readable model name for the footer."""
     label_map = {
-        "minimax/minimax-m3": "MiniMax M3",
-        "minimax/minimax-m3:free": "MiniMax M3",
+        "nex-agi/nex-n2.5-pro:free": "Nex N2.5 Pro",
+        "nex-agi/nex-n2.5-pro": "Nex N2.5 Pro",
         "nvidia/nemotron-3.5-lightning:free": "Nemotron 3.5 Lightning",
         "nvidia/nemotron-3-ultra-550b-a55b:free": "Nemotron Ultra",
         "nvidia/nemotron-3.5-lightning-30b-a3b": "Nemotron Lightning 30B",

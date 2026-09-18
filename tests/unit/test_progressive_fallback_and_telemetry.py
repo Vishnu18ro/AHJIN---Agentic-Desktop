@@ -470,14 +470,14 @@ async def test_local_fallback_occurs_only_after_cloud_exhaustion() -> None:
 def test_telemetry_case_1_direct_request() -> None:
     """Case 1: No rerouting anywhere in request lifecycle -> Path: Direct."""
     info = RuntimeInfo(
-        selected_model="minimax/minimax-m3",
+        selected_model="nex-agi/nex-n2.5-pro:free",
         provider_id="openrouter",
         tier="FAST",
         was_rerouted=False,
         health_status="HEALTHY",
     )
     footer = _build_runtime_footer(info)
-    assert "Model: MiniMax M3" in footer
+    assert "Model: Nex N2.5 Pro" in footer
     assert "Provider: OpenRouter" in footer
     assert "Route: FAST" in footer
     assert "Path: Direct" in footer
@@ -493,7 +493,7 @@ def test_telemetry_case_2_planner_reroutes() -> None:
         tier="FAST",
         was_rerouted=True,
         planner_was_rerouted=True,
-        planner_failed_model="minimax/minimax-m3",
+        planner_failed_model="nex-agi/nex-n2.5-pro:free",
         planner_selected_model="nvidia/nemotron-3.5-lightning:free",
         planner_failure_reason="HTTP 402",
         harness_was_rerouted=False,
@@ -503,7 +503,7 @@ def test_telemetry_case_2_planner_reroutes() -> None:
     assert "Model: Nemotron 3.5 Lightning" in footer
     assert "Provider: OpenRouter" in footer
     assert "Path: ↪ Rerouted" in footer
-    assert "Planner: MiniMax M3 ❌ 402 → Nemotron 3.5 Lightning ✅" in footer
+    assert "Planner: Nex N2.5 Pro ❌ 402 → Nemotron 3.5 Lightning ✅" in footer
     assert "Harness: Nemotron 3.5 Lightning" in footer
     assert "Reason: HTTP 402" in footer
 
@@ -517,7 +517,7 @@ def test_telemetry_case_3_harness_reroutes() -> None:
         was_rerouted=True,
         planner_was_rerouted=False,
         harness_was_rerouted=True,
-        harness_failed_model="minimax/minimax-m3",
+        harness_failed_model="nex-agi/nex-n2.5-pro:free",
         harness_failure_reason="HTTP 402",
         health_status="HEALTHY",
     )
@@ -525,7 +525,7 @@ def test_telemetry_case_3_harness_reroutes() -> None:
     assert "Model: Nemotron 3.5 Lightning" in footer
     assert "Provider: OpenRouter" in footer
     assert "Path: ↪ Rerouted" in footer
-    assert "Harness: MiniMax M3 ❌ 402 → Nemotron 3.5 Lightning ✅" in footer
+    assert "Harness: Nex N2.5 Pro ❌ 402 → Nemotron 3.5 Lightning ✅" in footer
     assert "Planner:" not in footer
     assert "Reason: HTTP 402" in footer
 
@@ -538,7 +538,7 @@ def test_telemetry_case_4_planner_and_harness_both_reroute() -> None:
         tier="HEAVY",
         was_rerouted=True,
         planner_was_rerouted=True,
-        planner_failed_model="minimax/minimax-m3",
+        planner_failed_model="nex-agi/nex-n2.5-pro:free",
         planner_selected_model="nvidia/nemotron-3.5-lightning:free",
         planner_failure_reason="HTTP 402",
         harness_was_rerouted=True,
@@ -550,7 +550,7 @@ def test_telemetry_case_4_planner_and_harness_both_reroute() -> None:
     assert "Model: Nemotron Ultra 550B" in footer
     assert "Provider: NVIDIA" in footer
     assert "Path: ↪ Rerouted" in footer
-    assert "Planner: MiniMax M3 ❌ 402 → Nemotron 3.5 Lightning ✅" in footer
+    assert "Planner: Nex N2.5 Pro ❌ 402 → Nemotron 3.5 Lightning ✅" in footer
     assert "Harness: Nemotron 3.5 Lightning ❌ network error → Nemotron Ultra 550B ✅" in footer
     assert "Reason: network error" in footer
     assert "From:" not in footer
@@ -559,7 +559,7 @@ def test_telemetry_case_4_planner_and_harness_both_reroute() -> None:
 def test_footer_structure_direct_order() -> None:
     """Validate exact order: Model/Provider/Route -> Latency -> Path -> Health."""
     info = RuntimeInfo(
-        selected_model="minimax/minimax-m3",
+        selected_model="nex-agi/nex-n2.5-pro:free",
         provider_id="openrouter",
         tier="FAST",
         total_ms=150.0,
@@ -572,7 +572,7 @@ def test_footer_structure_direct_order() -> None:
     assert "From:" not in footer
 
     idx_runtime = footer.index("⚡ AHJIN Runtime")
-    idx_model = footer.index("Model: MiniMax M3")
+    idx_model = footer.index("Model: Nex N2.5 Pro")
     idx_provider = footer.index("Provider: OpenRouter")
     idx_route = footer.index("Route: FAST")
     idx_latency = footer.index("⏱ Latency")
@@ -597,9 +597,9 @@ def test_footer_structure_rerouted_order_and_no_from_line() -> None:
         provider_api_ms=40.0,
         model_api_ms=200.0,
         was_rerouted=True,
-        failed_model="minimax/minimax-m3",  # Populated, but must NOT show as 'From:'
+        failed_model="nex-agi/nex-n2.5-pro:free",  # Populated, but must NOT show as 'From:'
         planner_was_rerouted=True,
-        planner_failed_model="minimax/minimax-m3",
+        planner_failed_model="nex-agi/nex-n2.5-pro:free",
         planner_selected_model="nvidia/nemotron-3.5-lightning:free",
         planner_failure_reason="HTTP 402",
         harness_was_rerouted=False,
@@ -614,7 +614,7 @@ def test_footer_structure_rerouted_order_and_no_from_line() -> None:
     idx_latency = footer.index("⏱ Latency")
     idx_total = footer.index("└─ Total: 250ms")
     idx_path = footer.index("Path: ↪ Rerouted")
-    idx_planner = footer.index("Planner: MiniMax M3 ❌ 402 → Nemotron 3.5 Lightning ✅")
+    idx_planner = footer.index("Planner: Nex N2.5 Pro ❌ 402 → Nemotron 3.5 Lightning ✅")
     idx_harness = footer.index("Harness: Nemotron 3.5 Lightning")
     idx_reason = footer.index("Reason: HTTP 402")
     idx_health = footer.index("Health: 🟢 Healthy")
@@ -640,7 +640,7 @@ def test_provider_and_model_latency_separation_in_footer() -> None:
     timer.record(STAGE_MODEL_GENERATION, 2769.0)
 
     info = RuntimeInfo(
-        selected_model="minimax/minimax-m3",
+        selected_model="nex-agi/nex-n2.5-pro:free",
         provider_id="openrouter",
         tier="FAST",
         total_ms=9219.0,
@@ -652,7 +652,7 @@ def test_provider_and_model_latency_separation_in_footer() -> None:
     )
 
     footer = _build_runtime_footer(info)
-    assert "Model: MiniMax M3" in footer
+    assert "Model: Nex N2.5 Pro" in footer
     assert "Provider: OpenRouter" in footer
     assert "├─ AHJIN: 5ms" in footer
     assert "├─ Provider: 184ms" in footer
@@ -670,7 +670,7 @@ async def test_streaming_measures_ttft_and_generation_separately() -> None:
     catalog = ModelCatalog()
     catalog.register(
         ModelDescriptor(
-            model_id="minimax/minimax-m3",
+            model_id="nex-agi/nex-n2.5-pro:free",
             provider_id="openrouter",
             tier=ModelTier.ALL,
             priority=300,
@@ -710,7 +710,7 @@ async def test_streaming_measures_ttft_and_generation_separately() -> None:
     assert "".join(chunks) == "Chunk 1 Chunk 2"
     assert final_info is not None
     assert final_info.runtime_info is not None
-    assert final_info.runtime_info.selected_model == "minimax/minimax-m3"
+    assert final_info.runtime_info.selected_model == "nex-agi/nex-n2.5-pro:free"
     assert final_info.runtime_info.provider_id == "openrouter"
     # Verify TTFT stage was recorded
     assert STAGE_TIME_TO_FIRST_TOKEN in timer.snapshot()
@@ -908,7 +908,7 @@ def test_chronological_planner_reroute_chain_multi_candidate() -> None:
         was_rerouted=True,
         planner_was_rerouted=True,
         planner_attempts=[
-            RerouteAttempt(model_id="minimax/minimax-m3", success=False, reason="HTTP 402"),
+            RerouteAttempt(model_id="nex-agi/nex-n2.5-pro:free", success=False, reason="HTTP 402"),
             RerouteAttempt(
                 model_id="nvidia/nemotron-3.5-lightning:free",
                 success=False,
@@ -926,7 +926,7 @@ def test_chronological_planner_reroute_chain_multi_candidate() -> None:
     )
     footer = _build_runtime_footer(info)
     expected_planner_line = (
-        "Planner: MiniMax M3 ❌ 402 → Nemotron 3.5 Lightning ❌ timeout → "
+        "Planner: Nex N2.5 Pro ❌ 402 → Nemotron 3.5 Lightning ❌ timeout → "
         "Nemotron Lightning 30B ❌ timeout → Gemma 3 4B ✅"
     )
     assert expected_planner_line in footer
@@ -941,7 +941,7 @@ def test_chronological_planner_chain_skips_unhealthy_model() -> None:
         tier="FAST",
         was_rerouted=True,
         planner_was_rerouted=True,
-        # MiniMax was unhealthy, so only Nemotron Lightning and Gemma were attempted
+        # Nex N2.5 Pro was unhealthy, so only Nemotron Lightning and Gemma were attempted
         planner_attempts=[
             RerouteAttempt(
                 model_id="nvidia/nemotron-3.5-lightning:free",
@@ -964,6 +964,7 @@ def test_chronological_planner_chain_skips_unhealthy_model() -> None:
         "Nemotron Lightning 30B ❌ timeout → Gemma 3 4B ✅"
     )
     assert expected_planner_line in footer
+    assert "Nex N2.5 Pro" not in footer
     assert "MiniMax" not in footer
 
 
@@ -977,7 +978,7 @@ def test_chronological_harness_reroute_chain_multi_candidate() -> None:
         planner_was_rerouted=False,
         harness_was_rerouted=True,
         harness_attempts=[
-            RerouteAttempt(model_id="minimax/minimax-m3", success=False, reason="HTTP 402"),
+            RerouteAttempt(model_id="nex-agi/nex-n2.5-pro:free", success=False, reason="HTTP 402"),
             RerouteAttempt(
                 model_id="nvidia/nemotron-3-ultra-550b-a55b:free",
                 success=False,
@@ -990,7 +991,7 @@ def test_chronological_harness_reroute_chain_multi_candidate() -> None:
     footer = _build_runtime_footer(info)
     assert "Planner:" not in footer
     expected_harness_line = (
-        "Harness: MiniMax M3 ❌ 402 → Nemotron Ultra ❌ timeout → Nemotron Ultra 550B ✅"
+        "Harness: Nex N2.5 Pro ❌ 402 → Nemotron Ultra ❌ timeout → Nemotron Ultra 550B ✅"
     )
     assert expected_harness_line in footer
 
@@ -1004,7 +1005,7 @@ def test_chronological_independent_both_rerouted() -> None:
         was_rerouted=True,
         planner_was_rerouted=True,
         planner_attempts=[
-            RerouteAttempt(model_id="minimax/minimax-m3", success=False, reason="HTTP 402"),
+            RerouteAttempt(model_id="nex-agi/nex-n2.5-pro:free", success=False, reason="HTTP 402"),
             RerouteAttempt(model_id="nvidia/nemotron-3.5-lightning:free", success=True),
         ],
         harness_was_rerouted=True,
@@ -1019,7 +1020,7 @@ def test_chronological_independent_both_rerouted() -> None:
         health_status="LOCAL",
     )
     footer = _build_runtime_footer(info)
-    assert "Planner: MiniMax M3 ❌ 402 → Nemotron 3.5 Lightning ✅" in footer
+    assert "Planner: Nex N2.5 Pro ❌ 402 → Nemotron 3.5 Lightning ✅" in footer
     assert "Harness: Nemotron 3.5 Lightning ❌ network error → Gemma 3 4B ✅" in footer
 
 
@@ -1032,7 +1033,7 @@ def test_chronological_all_attempts_failed_no_success_indicator() -> None:
         was_rerouted=True,
         planner_was_rerouted=True,
         planner_attempts=[
-            RerouteAttempt(model_id="minimax/minimax-m3", success=False, reason="HTTP 402"),
+            RerouteAttempt(model_id="nex-agi/nex-n2.5-pro:free", success=False, reason="HTTP 402"),
             RerouteAttempt(
                 model_id="nvidia/nemotron-3.5-lightning:free",
                 success=False,
@@ -1042,6 +1043,6 @@ def test_chronological_all_attempts_failed_no_success_indicator() -> None:
         health_status="UNHEALTHY",
     )
     footer = _build_runtime_footer(info)
-    assert "Planner: MiniMax M3 ❌ 402 → Nemotron 3.5 Lightning ❌ timeout" in footer
+    assert "Planner: Nex N2.5 Pro ❌ 402 → Nemotron 3.5 Lightning ❌ timeout" in footer
     assert "✅" not in footer
 

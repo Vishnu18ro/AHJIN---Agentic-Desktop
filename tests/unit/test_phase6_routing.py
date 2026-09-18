@@ -78,12 +78,12 @@ class MockStreamingProvider(BaseModelProvider):
 
 
 # ---------------------------------------------------------------------------
-# Test 1, 2, 3: MiniMax M3 is Primary for ALL Request Types
+# Test 1, 2, 3: Nex N2.5 Pro is Primary for ALL Request Types
 # ---------------------------------------------------------------------------
 
 
-def test_1_normal_light_request_selects_minimax() -> None:
-    """1. Normal LIGHT request: MiniMax M3 is attempted first."""
+def test_1_normal_light_request_selects_nex_n2_5_pro() -> None:
+    """1. Normal LIGHT request: Nex N2.5 Pro is attempted first."""
     router = ModelRouter(catalog=create_default_catalog())
     strategy = ExecutionStrategy(
         capability_requirements=CapabilityRequirements(
@@ -92,33 +92,33 @@ def test_1_normal_light_request_selects_minimax() -> None:
         preferred_tier="FAST",
     )
     selection = router.select_model(strategy)
-    assert selection.model_id == "minimax/minimax-m3"
+    assert selection.model_id == "nex-agi/nex-n2.5-pro:free"
     assert selection.provider_id == "openrouter"
     assert selection.tier == ModelTier.FAST
 
 
-def test_2_heavy_reasoning_request_selects_minimax() -> None:
-    """2. HEAVY reasoning request: MiniMax M3 is attempted first."""
+def test_2_heavy_reasoning_request_selects_nex_n2_5_pro() -> None:
+    """2. HEAVY reasoning request: Nex N2.5 Pro is attempted first."""
     router = ModelRouter(catalog=create_default_catalog())
     strategy = ExecutionStrategy(
         capability_requirements=CapabilityRequirements(requires_reasoning=True),
         preferred_tier="HEAVY",
     )
     selection = router.select_model(strategy)
-    assert selection.model_id == "minimax/minimax-m3"
+    assert selection.model_id == "nex-agi/nex-n2.5-pro:free"
     assert selection.provider_id == "openrouter"
     assert selection.tier == ModelTier.HEAVY
 
 
-def test_3_coding_request_selects_minimax() -> None:
-    """3. Coding request: MiniMax M3 is attempted first."""
+def test_3_coding_request_selects_nex_n2_5_pro() -> None:
+    """3. Coding request: Nex N2.5 Pro is attempted first."""
     router = ModelRouter(catalog=create_default_catalog())
     strategy = ExecutionStrategy(
         capability_requirements=CapabilityRequirements(requires_code=True),
         preferred_tier="HEAVY",
     )
     selection = router.select_model(strategy)
-    assert selection.model_id == "minimax/minimax-m3"
+    assert selection.model_id == "nex-agi/nex-n2.5-pro:free"
     assert selection.provider_id == "openrouter"
 
 
@@ -127,8 +127,8 @@ def test_3_coding_request_selects_minimax() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_4_minimax_failure_light_selects_openrouter_nemotron_lightning() -> None:
-    """4. MiniMax failure + LIGHT: OpenRouter Nemotron Lightning is selected."""
+def test_4_nex_failure_light_selects_openrouter_nemotron_lightning() -> None:
+    """4. Nex N2.5 Pro failure + LIGHT: OpenRouter Nemotron Lightning is selected."""
     router = ModelRouter(catalog=create_default_catalog())
     strategy = ExecutionStrategy(
         capability_requirements=CapabilityRequirements(
@@ -136,15 +136,15 @@ def test_4_minimax_failure_light_selects_openrouter_nemotron_lightning() -> None
         ),
         preferred_tier="FAST",
     )
-    # MiniMax M3 excluded due to previous failure
-    selection = router.select_model(strategy, excluded_model_ids={"minimax/minimax-m3"})
+    # Nex N2.5 Pro excluded due to previous failure
+    selection = router.select_model(strategy, excluded_model_ids={"nex-agi/nex-n2.5-pro:free"})
     assert selection.model_id == "nvidia/nemotron-3.5-lightning:free"
     assert selection.provider_id == "openrouter"
     assert selection.tier == ModelTier.FAST
 
 
-def test_5_minimax_and_openrouter_failure_light_selects_nvidia_nemotron_lightning() -> None:
-    """5. MiniMax + OpenRouter Nemotron failure: NVIDIA Nemotron Lightning selected."""
+def test_5_nex_and_openrouter_failure_light_selects_nvidia_nemotron_lightning() -> None:
+    """5. Nex N2.5 Pro + OpenRouter Nemotron failure: NVIDIA Nemotron Lightning selected."""
     router = ModelRouter(catalog=create_default_catalog())
     strategy = ExecutionStrategy(
         capability_requirements=CapabilityRequirements(
@@ -152,7 +152,7 @@ def test_5_minimax_and_openrouter_failure_light_selects_nvidia_nemotron_lightnin
         ),
         preferred_tier="FAST",
     )
-    excluded = {"minimax/minimax-m3", "nvidia/nemotron-3.5-lightning:free"}
+    excluded = {"nex-agi/nex-n2.5-pro:free", "nvidia/nemotron-3.5-lightning:free"}
     selection = router.select_model(strategy, excluded_model_ids=excluded)
     assert selection.model_id == "nvidia/nemotron-3.5-lightning-30b-a3b"
     assert selection.provider_id == "nvidia"
@@ -164,27 +164,27 @@ def test_5_minimax_and_openrouter_failure_light_selects_nvidia_nemotron_lightnin
 # ---------------------------------------------------------------------------
 
 
-def test_6_minimax_failure_heavy_selects_openrouter_nemotron_ultra() -> None:
-    """6. MiniMax failure + HEAVY: OpenRouter Nemotron Ultra selected."""
+def test_6_nex_failure_heavy_selects_openrouter_nemotron_ultra() -> None:
+    """6. Nex N2.5 Pro failure + HEAVY: OpenRouter Nemotron Ultra selected."""
     router = ModelRouter(catalog=create_default_catalog())
     strategy = ExecutionStrategy(
         capability_requirements=CapabilityRequirements(requires_reasoning=True),
         preferred_tier="HEAVY",
     )
-    selection = router.select_model(strategy, excluded_model_ids={"minimax/minimax-m3"})
+    selection = router.select_model(strategy, excluded_model_ids={"nex-agi/nex-n2.5-pro:free"})
     assert selection.model_id == "nvidia/nemotron-3-ultra-550b-a55b:free"
     assert selection.provider_id == "openrouter"
     assert selection.tier == ModelTier.HEAVY
 
 
-def test_7_minimax_and_openrouter_ultra_failure_selects_nvidia_nemotron_ultra() -> None:
-    """7. MiniMax failure + HEAVY + OpenRouter Ultra failure: NVIDIA Nemotron Ultra selected."""
+def test_7_nex_and_openrouter_ultra_failure_selects_nvidia_nemotron_ultra() -> None:
+    """7. Nex N2.5 Pro failure + HEAVY + OpenRouter Ultra failure: NVIDIA Nemotron Ultra selected."""
     router = ModelRouter(catalog=create_default_catalog())
     strategy = ExecutionStrategy(
         capability_requirements=CapabilityRequirements(requires_reasoning=True),
         preferred_tier="HEAVY",
     )
-    excluded = {"minimax/minimax-m3", "nvidia/nemotron-3-ultra-550b-a55b:free"}
+    excluded = {"nex-agi/nex-n2.5-pro:free", "nvidia/nemotron-3-ultra-550b-a55b:free"}
     selection = router.select_model(strategy, excluded_model_ids=excluded)
     assert selection.model_id == "nvidia/nemotron-3-ultra-550b-a55b"
     assert selection.provider_id == "nvidia"
@@ -199,7 +199,7 @@ def test_8_continue_heavy_fallback_kimi_deepseek_pro_deepseek_flash() -> None:
         preferred_tier="HEAVY",
     )
     excluded = {
-        "minimax/minimax-m3",
+        "nex-agi/nex-n2.5-pro:free",
         "nvidia/nemotron-3-ultra-550b-a55b:free",
         "nvidia/nemotron-3-ultra-550b-a55b",
     }
@@ -235,18 +235,18 @@ def test_9_circuit_breaker_preservation() -> None:
         preferred_tier="HEAVY",
     )
 
-    # Initially healthy -> MiniMax M3
-    assert router.select_model(strategy).model_id == "minimax/minimax-m3"
+    # Initially healthy -> Nex N2.5 Pro
+    assert router.select_model(strategy).model_id == "nex-agi/nex-n2.5-pro:free"
 
-    # Trip circuit breaker on MiniMax M3 (3 failures)
-    health.record_failure("minimax/minimax-m3")
-    health.record_failure("minimax/minimax-m3")
-    health.record_failure("minimax/minimax-m3")
+    # Trip circuit breaker on Nex N2.5 Pro (3 failures)
+    health.record_failure("nex-agi/nex-n2.5-pro:free")
+    health.record_failure("nex-agi/nex-n2.5-pro:free")
+    health.record_failure("nex-agi/nex-n2.5-pro:free")
 
-    assert health.get_state("minimax/minimax-m3").snapshot_status == ModelHealthStatus.UNHEALTHY
-    assert not health.get_state("minimax/minimax-m3").is_available()
+    assert health.get_state("nex-agi/nex-n2.5-pro:free").snapshot_status == ModelHealthStatus.UNHEALTHY
+    assert not health.get_state("nex-agi/nex-n2.5-pro:free").is_available()
 
-    # Router must automatically bypass tripped MiniMax without manual exclusion
+    # Router must automatically bypass tripped primary model without manual exclusion
     selection = router.select_model(strategy)
     assert selection.model_id == "nvidia/nemotron-3-ultra-550b-a55b:free"
 
@@ -262,7 +262,7 @@ def test_10_ollama_offline_fallback_preserved() -> None:
 
     # All cloud FAST models excluded
     cloud_fast = {
-        "minimax/minimax-m3",
+        "nex-agi/nex-n2.5-pro:free",
         "nvidia/nemotron-3.5-lightning:free",
         "nvidia/nemotron-3.5-lightning-30b-a3b",
     }
@@ -276,7 +276,7 @@ def test_10_ollama_offline_fallback_preserved() -> None:
 
     # All cloud HEAVY models excluded
     cloud_heavy = {
-        "minimax/minimax-m3",
+        "nex-agi/nex-n2.5-pro:free",
         "nvidia/nemotron-3-ultra-550b-a55b:free",
         "nvidia/nemotron-3-ultra-550b-a55b",
         "moonshotai/kimi-k3",
@@ -299,7 +299,7 @@ def test_10_ollama_offline_fallback_preserved() -> None:
 
 @pytest.mark.asyncio
 async def test_11_streaming_via_gateway() -> None:
-    """11. Streaming remains functional with MiniMax as primary."""
+    """11. Streaming remains functional with Nex N2.5 Pro as primary."""
     registry = ProviderRegistry()
     registry.register(MockStreamingProvider("openrouter"))
     registry.register(MockStreamingProvider("nvidia"))
@@ -313,9 +313,9 @@ async def test_11_streaming_via_gateway() -> None:
     chunks: list[str] = []
     async for chunk, sel in gateway.invoke_stream(prompt, strategy):
         chunks.append(chunk)
-        assert sel.model_id == "minimax/minimax-m3"
+        assert sel.model_id == "nex-agi/nex-n2.5-pro:free"
 
-    assert "".join(chunks) == "Hello from minimax/minimax-m3"
+    assert "".join(chunks) == "Hello from nex-agi/nex-n2.5-pro:free"
 
 
 @pytest.mark.asyncio
@@ -339,16 +339,16 @@ async def test_12_telemetry_recording_runtime_info() -> None:
     result = await runner.run(plan=plan, context=TaskContext(session_id="s1"))
     assert result.success
     assert result.runtime_info is not None
-    assert result.runtime_info.selected_model == "minimax/minimax-m3"
+    assert result.runtime_info.selected_model == "nex-agi/nex-n2.5-pro:free"
     assert result.runtime_info.provider_id == "openrouter"
 
 
 def test_13_no_hidden_reasoning_in_catalog() -> None:
     """13. Reasoning capabilities are internal; models are cataloged with strict boundaries."""
     catalog = create_default_catalog()
-    minimax = catalog.get_model("minimax/minimax-m3")
-    assert minimax.capabilities.reasoning is True
-    assert minimax.role == ModelRole.PRIMARY
+    nex = catalog.get_model("nex-agi/nex-n2.5-pro:free")
+    assert nex.capabilities.reasoning is True
+    assert nex.role == ModelRole.PRIMARY
 
     lightning_free = catalog.get_model("nvidia/nemotron-3.5-lightning:free")
     assert lightning_free.capabilities.reasoning is True

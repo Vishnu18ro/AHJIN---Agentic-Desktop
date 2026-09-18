@@ -472,7 +472,7 @@ OUTPUT EXAMPLES
 class ToolIntentPlanner:
     """LLM-assisted tool intent planner.
 
-    Converts user input into a structured PlannerResult using MiniMax M3.
+    Converts user input into a structured PlannerResult using primary model (Nex N2.5 Pro).
     Strictly enforces that tools exist in ToolRegistry and parameters match whitelists.
     Explicitly distinguishes between TOOL_SELECTED, NO_TOOL, and PLANNER_FAILURE.
     Does NOT execute tools or possess permission to perform actions.

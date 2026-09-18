@@ -32,7 +32,9 @@ def test_minimax_m3_absent_from_default_catalog() -> None:
     """Assertion 1: MiniMax M3 must NOT be present in active catalog."""
     catalog = create_default_catalog()
     model_ids = [m.model_id for m in catalog.list_models()]
+    assert "minimax/minimax-m3" not in model_ids
     assert "minimaxai/minimax-m3" not in model_ids
+    assert "nex-agi/nex-n2.5-pro:free" in model_ids
 
 
 def test_kimi_k3_present_in_default_catalog() -> None:
@@ -47,7 +49,7 @@ def test_exact_active_catalog_models() -> None:
     catalog = create_default_catalog()
     model_ids = set(m.model_id for m in catalog.list_models())
     expected = {
-        "minimax/minimax-m3",
+        "nex-agi/nex-n2.5-pro:free",
         "nvidia/nemotron-3.5-lightning:free",
         "nvidia/nemotron-3.5-lightning-30b-a3b",
         "nvidia/nemotron-3-ultra-550b-a55b:free",
@@ -67,25 +69,25 @@ def test_exact_active_catalog_models() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_minimax_m3_is_first_preferred_heavy_model() -> None:
-    """Assertion 3: OpenRouter MiniMax M3 is preferred #1 for HEAVY requests."""
+def test_nex_n2_5_pro_is_first_preferred_heavy_model() -> None:
+    """Assertion 3: OpenRouter Nex N2.5 Pro is preferred #1 for HEAVY requests."""
     catalog = create_default_catalog()
     router = ModelRouter(catalog=catalog)
     reqs = CapabilityRequirements(requires_reasoning=True)
     strategy = ExecutionStrategy(capability_requirements=reqs, preferred_tier="HEAVY")
 
     selection = router.select_model(strategy)
-    assert selection.model_id == "minimax/minimax-m3"
+    assert selection.model_id == "nex-agi/nex-n2.5-pro:free"
     assert selection.tier == ModelTier.HEAVY
 
 
 def test_catalog_preference_order_strictly_wins_over_higher_quality_score() -> None:
     """Explicit catalog priority MUST strictly win over quality_score.
 
-    MiniMax M3: priority=300
+    Nex N2.5 Pro: priority=300
     Nemotron Ultra: priority=230 / 200
 
-    When eligible, MiniMax M3 MUST be selected.
+    When eligible, Nex N2.5 Pro MUST be selected.
     """
     catalog = create_default_catalog()
     router = ModelRouter(catalog=catalog)
@@ -97,14 +99,14 @@ def test_catalog_preference_order_strictly_wins_over_higher_quality_score() -> N
             quality_preference=pref,
         )
         selection = router.select_model(strategy)
-        assert selection.model_id == "minimax/minimax-m3", (
+        assert selection.model_id == "nex-agi/nex-n2.5-pro:free", (
             f"Under quality_preference='{pref}', {selection.model_id} was selected "
-            "instead of higher-priority minimax/minimax-m3."
+            "instead of higher-priority nex-agi/nex-n2.5-pro:free."
         )
 
 
-def test_openrouter_nemotron_ultra_selected_when_minimax_m3_excluded() -> None:
-    """Assertion 4: OpenRouter Nemotron Ultra is selected when MiniMax M3 is excluded."""
+def test_openrouter_nemotron_ultra_selected_when_nex_n2_5_pro_excluded() -> None:
+    """Assertion 4: OpenRouter Nemotron Ultra is selected when Nex N2.5 Pro is excluded."""
     catalog = create_default_catalog()
     router = ModelRouter(catalog=catalog)
     strategy = ExecutionStrategy(
@@ -113,7 +115,7 @@ def test_openrouter_nemotron_ultra_selected_when_minimax_m3_excluded() -> None:
     )
 
     selection = router.select_model(
-        strategy, excluded_model_ids={"minimax/minimax-m3"}
+        strategy, excluded_model_ids={"nex-agi/nex-n2.5-pro:free"}
     )
     assert selection.model_id == "nvidia/nemotron-3-ultra-550b-a55b:free"
 
@@ -130,7 +132,7 @@ def test_nvidia_nemotron_ultra_selected_when_top2_excluded() -> None:
     selection = router.select_model(
         strategy,
         excluded_model_ids={
-            "minimax/minimax-m3",
+            "nex-agi/nex-n2.5-pro:free",
             "nvidia/nemotron-3-ultra-550b-a55b:free",
         },
     )
@@ -149,7 +151,7 @@ def test_kimi_k3_selected_when_top3_excluded() -> None:
     selection = router.select_model(
         strategy,
         excluded_model_ids={
-            "minimax/minimax-m3",
+            "nex-agi/nex-n2.5-pro:free",
             "nvidia/nemotron-3-ultra-550b-a55b:free",
             "nvidia/nemotron-3-ultra-550b-a55b",
         },
@@ -168,7 +170,7 @@ def test_capability_constraints_override_preference() -> None:
 
     catalog.register(
         ModelDescriptor(
-            model_id="minimax/minimax-m3",
+            model_id="nex-agi/nex-n2.5-pro:free",
             provider_id="openrouter",
             tier=ModelTier.HEAVY,
             priority=250,
@@ -200,8 +202,8 @@ def test_max_latency_ms_overrides_preference() -> None:
     catalog = create_default_catalog()
     health = ModelHealthTracker()
 
-    # MiniMax M3 has an observed EMA latency of 8000ms (exceeds 5000ms budget)
-    health.get_state("minimax/minimax-m3").record_success(8000.0)
+    # Nex N2.5 Pro has an observed EMA latency of 8000ms (exceeds 5000ms budget)
+    health.get_state("nex-agi/nex-n2.5-pro:free").record_success(8000.0)
     # Nemotron Ultra has observed latency of 1500ms (within budget)
     health.get_state("nvidia/nemotron-3-ultra-550b-a55b:free").record_success(1500.0)
 
@@ -218,10 +220,10 @@ def test_health_filtering_overrides_preference() -> None:
     catalog = create_default_catalog()
     health = ModelHealthTracker()
 
-    # MiniMax M3 is UNHEALTHY (3 failures)
-    health.record_failure("minimax/minimax-m3")
-    health.record_failure("minimax/minimax-m3")
-    health.record_failure("minimax/minimax-m3")
+    # Nex N2.5 Pro is UNHEALTHY (3 failures)
+    health.record_failure("nex-agi/nex-n2.5-pro:free")
+    health.record_failure("nex-agi/nex-n2.5-pro:free")
+    health.record_failure("nex-agi/nex-n2.5-pro:free")
 
     router = ModelRouter(catalog=catalog, health_tracker=health)
     strategy = ExecutionStrategy(
@@ -242,7 +244,7 @@ def test_excluded_models_never_selected_during_recovery() -> None:
         preferred_tier="HEAVY",
     )
 
-    excluded = {"minimax/minimax-m3", "nvidia/nemotron-3-ultra-550b-a55b:free"}
+    excluded = {"nex-agi/nex-n2.5-pro:free", "nvidia/nemotron-3-ultra-550b-a55b:free"}
     selection = router.select_model(strategy, excluded_model_ids=excluded)
     assert selection.model_id not in excluded
 
@@ -262,5 +264,5 @@ def test_beru_contains_no_provider_or_model_specific_routing_knowledge() -> None
     strategy = ExecutionStrategy(capability_requirements=reqs)
 
     dump = str(strategy.model_dump()).lower()
-    for forbidden in ["kimi", "nemotron", "deepseek", "minimax", "nvidia"]:
+    for forbidden in ["kimi", "nemotron", "deepseek", "minimax", "nvidia", "nex"]:
         assert forbidden not in dump, f"BERU strategy leaked forbidden identifier '{forbidden}'"

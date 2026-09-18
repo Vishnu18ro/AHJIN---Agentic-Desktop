@@ -49,14 +49,14 @@ def create_default_catalog() -> ModelCatalog:
 
     Phase 6 Architecture:
       PRIMARY (Attempted First for ALL Requests):
-        - MiniMax M3 (OpenRouter, tier=ALL, priority=300)
+        - Nex N2.5 Pro (OpenRouter :free, tier=ALL, priority=300)
 
-      LIGHT FALLBACK CHAIN (After MiniMax failure on FAST/LIGHT):
+      LIGHT FALLBACK CHAIN (After Nex N2.5 Pro failure on FAST/LIGHT):
         1. Nemotron Lightning (OpenRouter :free, priority=220)
         2. Nemotron Lightning (NVIDIA Direct, priority=200)
         3. Gemma 3 4B (Ollama Offline, priority=100)
 
-      HEAVY FALLBACK CHAIN (After MiniMax failure on HEAVY):
+      HEAVY FALLBACK CHAIN (After Nex N2.5 Pro failure on HEAVY):
         1. Nemotron Ultra (OpenRouter :free, priority=230)
         2. Nemotron Ultra (NVIDIA Direct, priority=200)
         3. Kimi K3 (NVIDIA Direct, priority=170)
@@ -69,7 +69,7 @@ def create_default_catalog() -> ModelCatalog:
     # 1. PRIMARY MODEL — Attempted first for every request regardless of complexity
     catalog.register(
         ModelDescriptor(
-            model_id="minimax/minimax-m3",
+            model_id="nex-agi/nex-n2.5-pro:free",
             provider_id="openrouter",
             tier=ModelTier.ALL,
             role=ModelRole.PRIMARY,
@@ -82,6 +82,7 @@ def create_default_catalog() -> ModelCatalog:
             ),
             limits=ModelLimits(max_context_tokens=128000, max_output_tokens=4096),
             priority=300,
+            # Inherited primary slot score; priority=300 is unique so quality_score does not alter routing decisions
             quality_score=95,
             endpoint_verified=True,
         )
