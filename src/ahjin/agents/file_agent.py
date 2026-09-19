@@ -1,4 +1,4 @@
-"""Conversational File Agent ΓÇö Multi-turn file search, location clarification, and disambiguation."""
+"""Conversational File Agent — Multi-turn file search, location clarification, and disambiguation."""
 
 import re
 import time
@@ -90,15 +90,15 @@ def _build_location_keyboard() -> InlineKeyboardMarkup:
     """Build Telegram inline buttons for search location selection."""
     keyboard = [
         [
-            InlineKeyboardButton("≡ƒûÑ∩╕Å Desktop", callback_data="fileloc:desktop"),
-            InlineKeyboardButton("≡ƒôÑ Downloads", callback_data="fileloc:downloads"),
+            InlineKeyboardButton("🖥️ Desktop", callback_data="fileloc:desktop"),
+            InlineKeyboardButton("📥 Downloads", callback_data="fileloc:downloads"),
         ],
         [
-            InlineKeyboardButton("≡ƒôä Documents", callback_data="fileloc:documents"),
-            InlineKeyboardButton("≡ƒîÉ Search Everywhere", callback_data="fileloc:pc"),
+            InlineKeyboardButton("📄 Documents", callback_data="fileloc:documents"),
+            InlineKeyboardButton("🌐 Search Everywhere", callback_data="fileloc:pc"),
         ],
         [
-            InlineKeyboardButton("Γ¥î Cancel", callback_data="fileloc:cancel"),
+            InlineKeyboardButton("❌ Cancel", callback_data="fileloc:cancel"),
         ],
     ]
     return InlineKeyboardMarkup(keyboard)
@@ -112,7 +112,7 @@ def _build_selection_keyboard(candidates: list[Path]) -> InlineKeyboardMarkup:
         if len(button_text) > 40:
             button_text = button_text[:37] + "..."
         keyboard.append([InlineKeyboardButton(button_text, callback_data=f"filesel:{idx}")])
-    keyboard.append([InlineKeyboardButton("Γ¥î Cancel", callback_data="filesel:cancel")])
+    keyboard.append([InlineKeyboardButton("❌ Cancel", callback_data="filesel:cancel")])
     return InlineKeyboardMarkup(keyboard)
 
 
@@ -296,12 +296,44 @@ class FileAgent:
                 )
                 return True
 
-        # 4. State: IDLE — Deterministic local check only.
-        # NEVER invoke remote LLM planner (tool_planner.plan_tool_intent) while IDLE.
-        # Canonical BERU orchestrator remains authoritative for tool planning.
-        is_file_req, query, detected_loc = self.detect_file_intent(text)
-        if not is_file_req or not query:
+        # 4. State: IDLE — Check if this is a new file request using LLM planner
+        # (This accurately parses complex intents like "compress to less than 150 kb" 
+        # instead of incorrectly treating the whole text as a filename)
+        intent = await self.tool_planner.plan_tool_intent(text)
+        if not intent:
             return False
+
+        detected_loc = None
+        query = ""
+
+        if intent.tool_name == "file_search":
+            query = str(intent.parameters.get("query", ""))
+            detected_loc = str(intent.parameters.get("path", ""))
+        elif intent.tool_name == "image_edit":
+            path_str = str(intent.parameters.get("path", ""))
+            query = Path(path_str).name if path_str else ""
+            detected_loc = str(Path(path_str).parent) if path_str and "/" in path_str else None
+            session.image_operation = str(intent.parameters.get("operation", ""))
+            try:
+                session.target_kb = int(intent.parameters.get("target_kb", 0)) or None
+            except ValueError:
+                pass
+            session.target_dimensions = intent.parameters.get("target_dimensions")
+            session.scale = intent.parameters.get("scale")
+        elif intent.tool_name == "file_send":
+            query = str(intent.parameters.get("query", ""))
+            path_str = str(intent.parameters.get("path", ""))
+            if path_str and not query:
+                query = Path(path_str).name
+            detected_loc = str(Path(path_str).parent) if path_str and "/" in path_str else None
+        else:
+            return False
+
+        if not query:
+            return False
+            
+        if detected_loc in (".", "", "pc"):
+            detected_loc = None
 
         session.query = query
         session.original_instruction = text
@@ -341,7 +373,7 @@ class FileAgent:
             if loc_val == "cancel":
                 self.session_manager.reset_session(chat_id)
                 if query.message:
-                    await query.message.edit_text("Γ¥î File search cancelled.")
+                    await query.message.edit_text("❌ File search cancelled.")
                 return True
 
             if query.message:
@@ -355,7 +387,7 @@ class FileAgent:
             if sel_val == "cancel":
                 self.session_manager.reset_session(chat_id)
                 if query.message:
-                    await query.message.edit_text("Γ¥î File selection cancelled.")
+                    await query.message.edit_text("❌ File selection cancelled.")
                 return True
 
             try:
@@ -384,7 +416,7 @@ class FileAgent:
             return
 
         loc_label = "Everywhere (PC)" if location == "pc" else location.title()
-        status_msg = await target_msg.reply_text(f"≡ƒöì Searching for **\"{session.query}\"** in **{loc_label}**...")
+        status_msg = await target_msg.reply_text(f"🔍 Searching for **\"{session.query}\"** in **{loc_label}**...")
 
         candidates = self.search_tool.find_matching_files(session.query, path_str=location, max_results=10)
         session.candidates = candidates
@@ -394,19 +426,19 @@ class FileAgent:
             session.state = FileSessionState.IDLE
             if location != "pc":
                 retry_keyboard = InlineKeyboardMarkup([
-                    [InlineKeyboardButton("≡ƒîÉ Search Everywhere (Entire PC)", callback_data="fileloc:pc")],
-                    [InlineKeyboardButton("Γ¥î Cancel", callback_data="fileloc:cancel")],
+                    [InlineKeyboardButton("🌐 Search Everywhere (Entire PC)", callback_data="fileloc:pc")],
+                    [InlineKeyboardButton("❌ Cancel", callback_data="fileloc:cancel")],
                 ])
                 session.state = FileSessionState.AWAITING_LOCATION
                 await status_msg.edit_text(
-                    f"ΓÜá∩╕Å No files matching **\"{session.query}\"** found in **{loc_label}**.\n\n"
+                    f"⚠️ No files matching **\"{session.query}\"** found in **{loc_label}**.\n\n"
                     "Would you like me to search across your entire PC?",
                     reply_markup=retry_keyboard,
                     parse_mode="Markdown",
                 )
             else:
                 await status_msg.edit_text(
-                    f"ΓÜá∩╕Å No files matching **\"{session.query}\"** were found on your computer.",
+                    f"⚠️ No files matching **\"{session.query}\"** were found on your computer.",
                     parse_mode="Markdown",
                 )
             return
@@ -414,19 +446,19 @@ class FileAgent:
         # Branch 2: Exactly 1 match
         if len(candidates) == 1:
             candidate = candidates[0]
-            await status_msg.edit_text(f"≡ƒôä Found **{candidate.name}**! Sending it now...")
+            await status_msg.edit_text(f"📄 Found **{candidate.name}**! Sending it now...")
             await self._deliver_file(update, context, session, candidate)
             return
 
         # Branch 3: Multiple matches (e.g. nikhil_resume vs yashuresume)
         session.state = FileSessionState.AWAITING_SELECTION
         lines: list[str] = [
-            f"≡ƒöì I found **{len(candidates)} files** matching **\"{session.query}\"**:\n"
+            f"🔍 I found **{len(candidates)} files** matching **\"{session.query}\"**:\n"
         ]
         for idx, cand in enumerate(candidates, start=1):
             parent_folder = cand.parent.name or "Root"
             size_str = _format_file_size(cand.stat().st_size) if cand.exists() else ""
-            lines.append(f"{idx}. ≡ƒôä **`{cand.name}`** _({parent_folder} ΓÇó {size_str})_")
+            lines.append(f"{idx}. 📄 **`{cand.name}`** _({parent_folder} • {size_str})_")
 
         lines.append("\n**Which one would you like me to send?**\nTap a button below or reply with the number:")
 
@@ -449,13 +481,13 @@ class FileAgent:
             return
 
         if not file_path.exists() or not file_path.is_file():
-            await target_msg.reply_text(f"Γ¥î Error: File '{file_path.name}' no longer exists on disk.")
+            await target_msg.reply_text(f"❌ Error: File '{file_path.name}' no longer exists on disk.")
             self.session_manager.reset_session(session.chat_id)
             return
 
         # Check sensitivity
         if self.path_policy.is_sensitive_file(file_path):
-            await target_msg.reply_text(f"≡ƒöÆ Security Notice: Access to sensitive file '{file_path.name}' is prohibited.")
+            await target_msg.reply_text(f"🔒 Security Notice: Access to sensitive file '{file_path.name}' is prohibited.")
             self.session_manager.reset_session(session.chat_id)
             return
 
@@ -463,7 +495,7 @@ class FileAgent:
         size_bytes = file_path.stat().st_size
         if size_bytes > 50 * 1024 * 1024:
             await target_msg.reply_text(
-                f"ΓÜá∩╕Å File '{file_path.name}' ({_format_file_size(size_bytes)}) exceeds "
+                f"⚠️ File '{file_path.name}' ({_format_file_size(size_bytes)}) exceeds "
                 "Telegram's 50 MB attachment limit."
             )
             self.session_manager.reset_session(session.chat_id)
@@ -471,7 +503,7 @@ class FileAgent:
 
         # Perform image edit if requested
         if session.image_operation and session.image_operation in ("compress", "enlarge", "resize"):
-            status_msg = await target_msg.reply_text(f"≡ƒû╝∩╕Å Performing **{session.image_operation}** on {file_path.name}...")
+            status_msg = await target_msg.reply_text(f"🖼️ Performing **{session.image_operation}** on {file_path.name}...")
             
             edit_req = ToolInvocationRequest(
                 tool_name="image_edit",
@@ -486,7 +518,7 @@ class FileAgent:
             
             result = await self.image_edit_tool.execute(edit_req)
             if not result.success:
-                await status_msg.edit_text(f"Γ¥î Failed to {session.image_operation} image: {result.error.message if result.error else 'Unknown error'}")
+                await status_msg.edit_text(f"❌ Failed to {session.image_operation} image: {result.error.message if result.error else 'Unknown error'}")
                 self.session_manager.reset_session(session.chat_id)
                 return
             
@@ -494,9 +526,9 @@ class FileAgent:
             if result.output and isinstance(result.output, dict) and "attachment_paths" in result.output and result.output["attachment_paths"]:
                 file_path = Path(result.output["attachment_paths"][0])
                 size_bytes = file_path.stat().st_size
-                await status_msg.edit_text(f"Γ£à Image processed successfully! New size: {_format_file_size(size_bytes)}")
+                await status_msg.edit_text(f"✅ Image processed successfully! New size: {_format_file_size(size_bytes)}")
             else:
-                await status_msg.edit_text("Γ¥î Image processing failed to return output path.")
+                await status_msg.edit_text("❌ Image processing failed to return output path.")
                 self.session_manager.reset_session(session.chat_id)
                 return
 
@@ -506,7 +538,7 @@ class FileAgent:
                 await target_msg.reply_document(
                     document=doc_file,
                     filename=file_path.name,
-                    caption=f"≡ƒôä {file_path.name} ({_format_file_size(size_bytes)})",
+                    caption=f"📄 {file_path.name} ({_format_file_size(size_bytes)})",
                     read_timeout=120.0,
                     write_timeout=120.0,
                     connect_timeout=30.0,
@@ -521,7 +553,7 @@ class FileAgent:
             # Avoid showing a false failure error since Telegram's servers often complete delivery
         except Exception as exc:
             logger.error("Failed to send document in Telegram", error=str(exc), file_name=file_path.name)
-            await target_msg.reply_text(f"Γ¥î Failed to send document: {exc}")
+            await target_msg.reply_text(f"❌ Failed to send document: {exc}")
 
         # Reset session to IDLE after delivery
         self.session_manager.reset_session(session.chat_id)

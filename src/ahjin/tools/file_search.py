@@ -9,7 +9,7 @@ from ahjin.core.errors import AhjinError, ErrorCategory
 from ahjin.security.path_policy import SafePathPolicy
 from ahjin.tools.base import BaseTool, ToolInvocationRequest, ToolInvocationResult
 
-_MAX_FILES_SCANNED = 2000
+_MAX_FILES_SCANNED = 20000
 _MAX_MATCHES_RETURNED = 50
 _MAX_CONTENT_LINES_PER_FILE = 5
 _EXCLUDED_DIRS: frozenset[str] = frozenset({
@@ -174,6 +174,15 @@ class FileSearchTool(BaseTool):
             start_dir = search_root if search_root.is_dir() else search_root.parent
 
             for root, dirs, files in os.walk(start_dir):
+                total_matches = (
+                    len(user_path_matches)
+                    + len(user_content_matches)
+                    + len(code_path_matches)
+                    + len(code_content_matches)
+                )
+                if files_scanned >= _MAX_FILES_SCANNED or total_matches >= _MAX_MATCHES_RETURNED:
+                    break
+
                 # Prune excluded and temporary directories in-place
                 root_path = Path(root)
                 dirs[:] = [d for d in dirs if not _is_excluded_directory(d, root_path)]
@@ -392,13 +401,16 @@ class FileSearchTool(BaseTool):
         scanned = 0
 
         for search_root in search_roots:
-            if len(ranked_matches) >= max_results:
+            if len(ranked_matches) >= max_results or scanned >= _MAX_FILES_SCANNED:
                 break
             start_dir = search_root if search_root.is_dir() else search_root.parent
             if not start_dir.exists():
                 continue
             for root, dirs, files in os.walk(start_dir):
-                dirs[:] = [d for d in dirs if d.lower() not in _EXCLUDED_DIRS]
+                if len(ranked_matches) >= max_results or scanned >= _MAX_FILES_SCANNED:
+                    break
+                root_path = Path(root)
+                dirs[:] = [d for d in dirs if not _is_excluded_directory(d, root_path)]
                 for file_name in files:
                     if len(ranked_matches) >= max_results or scanned >= _MAX_FILES_SCANNED:
                         break

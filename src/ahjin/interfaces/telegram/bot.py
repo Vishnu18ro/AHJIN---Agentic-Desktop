@@ -476,10 +476,10 @@ class TelegramAdapter(BaseInterfaceAdapter):
         placeholder_msg = await update.message.reply_text("Thinking...")
         t_placeholder_ms = (time.monotonic() - t0_placeholder) * 1000.0
 
-        # 2. Check FileAgent active session
-        #    ACTIVE: FileAgent handles multi-turn interaction (awaiting location / selection)
-        #    IDLE: canonical AHJIN pipeline (Dispatcher -> BERU -> Tool Intent Planner -> Runner)
-        if self.file_agent is not None and self.file_agent.is_session_active(chat_id):
+        # 2. Check FileAgent for file search intent or active session
+        #    FileAgent handles multi-turn interaction (awaiting location / selection)
+        #    If not handled, falls through to canonical AHJIN pipeline
+        if self.file_agent is not None:
             try:
                 handled = await self.file_agent.handle_message(update, context)
                 if handled:
